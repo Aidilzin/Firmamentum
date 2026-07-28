@@ -6,13 +6,13 @@ Two ways to run it:
   python proxy.py "task description"   -> one-shot mode, runs once and exits
 
 Chat (/ask and auto-classified casual messages) runs on your local Ollama model
--- instant, free, no RunPod call. Coding tasks (/build and auto-classified tasks)
-still go through the full PM -> Dev -> QA pipeline on RunPod. Set OLLAMA_MODEL in
-.env to change which local model is used (default: qwen3:8b).
+-- instant, free. Coding tasks (/build and auto-classified tasks) go through
+the full PM -> Dev -> QA pipeline on your dedicated GPU Pod (vLLM / OpenAI API).
+Set OLLAMA_MODEL in .env to change which local model is used (default: qwen3:8b).
 
 Visual layer uses `rich` (pip install rich) -- colored demon announcements, a
-live spinner while waiting on RunPod instead of silent polling, syntax-highlighted
-code previews, and real diffs during QA repair instead of full-file re-dumps.
+live spinner during cloud inference execution, syntax-highlighted code previews,
+and real diffs during QA repair instead of full-file re-dumps.
 
 In the REPL, plain text is auto-classified as either a quick chat message or a
 coding task (see classify_intent). Override with /ask or /build if it guesses wrong.
@@ -56,24 +56,18 @@ load_dotenv()
 
 console = Console()
 
-ENDPOINT_ID = os.getenv("RUNPOD_ENDPOINT_ID")
-API_KEY = os.getenv("RUNPOD_API_KEY")
+CLOUD_API_URL = os.getenv("CLOUD_API_URL", "http://localhost:8000/v1/chat/completions")
+CLOUD_API_KEY = os.getenv("CLOUD_API_KEY", "")
+CLOUD_MODEL_NAME = os.getenv("CLOUD_MODEL_NAME", "qwen/qwen3.6-27b-fp8")
 
-RUN_URL = f"https://api.runpod.ai/v2/{ENDPOINT_ID}/run"
-STATUS_URL = f"https://api.runpod.ai/v2/{ENDPOINT_ID}/status"
-HEADERS = {
-    "Authorization": f"Bearer {API_KEY}",
-    "Content-Type": "application/json"
-}
+CLOUD_HEADERS = {"Content-Type": "application/json"}
+if CLOUD_API_KEY:
+    CLOUD_HEADERS["Authorization"] = f"Bearer {CLOUD_API_KEY}"
 
 WORKSPACE_DIR = os.path.abspath("./workspace")
-MODEL_NAME = "qwen/qwen3.6-27b-fp8"
 
 LOCAL_MODEL_NAME = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 LOCAL_API_URL = "http://localhost:11434/v1/chat/completions"
-
-MAX_POLL_WAIT_SECONDS = 600
-POLL_INTERVAL_SECONDS = 3
 
 TASK_KEYWORDS = {
     "build", "add", "fix", "implement", "create", "refactor", "debug",
@@ -125,58 +119,26 @@ def extract_fenced_code(raw_response: str) -> str:
 
 
 async def execute_cloud_inference(system_prompt: str, user_prompt: str, max_retries: int = 3) -> str:
-    """Submits a job and polls for completion. Shows a live spinner instead of
-    silent waiting, and gives up after MAX_POLL_WAIT_SECONDS with an explanation
-    -- a long wait here almost always means a cold start is re-downloading the
-    full model checkpoint."""
+    """Executes inference directly against a persistent GPU Pod running an
+    OpenAI-compatible server (e.g. vLLM, Ollama, TGI). Shows a live spinner while waiting."""
     payload = {
-        "input": {
-            "openai_route": "/v1/chat/completions",
-            "openai_input": {
-                "model": MODEL_NAME,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                "temperature": 0.1
-            }
-        }
+        "model": CLOUD_MODEL_NAME,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        "temperature": 0.1
     }
 
     last_error = None
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         for attempt in range(max_retries):
             try:
-                submit = await client.post(RUN_URL, headers=HEADERS, json=payload)
-                submit.raise_for_status()
-                job = submit.json()
-                job_id = job["id"]
-                status = job.get("status", "IN_QUEUE")
-
-                elapsed = 0
-                with console.status(f"[dim]Waiting on RunPod ({status})...[/dim]", spinner="dots") as live:
-                    while status in ("IN_QUEUE", "IN_PROGRESS"):
-                        if elapsed >= MAX_POLL_WAIT_SECONDS:
-                            raise RuntimeError(
-                                f"Job {job_id} still '{status}' after {MAX_POLL_WAIT_SECONDS}s -- giving up. "
-                                "This almost always means a cold start is re-downloading the full model "
-                                "checkpoint because no Network Volume is attached to the endpoint."
-                            )
-                        await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                        elapsed += POLL_INTERVAL_SECONDS
-                        live.update(f"[dim]Waiting on RunPod ({status}, {elapsed}s)...[/dim]")
-                        poll = await client.get(f"{STATUS_URL}/{job_id}", headers=HEADERS)
-                        poll.raise_for_status()
-                        job = poll.json()
-                        status = job.get("status")
-
-                if status != "COMPLETED":
-                    raise RuntimeError(f"RunPod job did not complete: {job}")
-
-                output = job.get("output", {})
-                if isinstance(output, list):
-                    output = output[0] if output else {}
-                return output["choices"][0]["message"]["content"]
+                with console.status("[dim]Executing cloud GPU inference...[/dim]", spinner="dots"):
+                    response = await client.post(CLOUD_API_URL, headers=CLOUD_HEADERS, json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    return data["choices"][0]["message"]["content"]
 
             except (httpx.HTTPError, KeyError, RuntimeError) as e:
                 last_error = e

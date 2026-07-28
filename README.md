@@ -2,20 +2,21 @@
 
 > **Hybrid Local/Cloud Multi-Agent Orchestrator for Autonomous Software Development**
 
-Firmamentum is an interactive, intent-routing CLI orchestrator that pairs a small local LLM (served via Ollama) with a high-capacity cloud model (served via RunPod Serverless GPU) to delegate software development workflows to a team of specialized AI agents ("Demons").
+Firmamentum is an interactive, intent-routing CLI orchestrator that pairs a small local LLM (served via Ollama) with a high-capacity coding model hosted on a dedicated GPU Pod (vLLM / OpenAI-compatible endpoint) to delegate software development workflows to a team of specialized AI agents ("Demons").
 
 ---
 
 ## 🚀 Key Features
 
-* 🔀 **Intent-Aware Hybrid Routing**: Casual chat queries and lightweight questions are handled locally via Ollama (`qwen3:8b`) at zero cost. Complex code modifications automatically trigger the cloud agent pipeline on RunPod (`qwen3.6-27b-fp8`).
+* 🔀 **Intent-Aware Hybrid Routing**: Casual chat queries and lightweight questions are handled locally via Ollama (`qwen3:8b`) at zero cost. Complex code modifications automatically trigger the cloud agent pipeline hosted on your dedicated GPU Pod (`CLOUD_API_URL`).
 * 👹 **Three-Demon Persona Pipeline**:
   1. **Laplace's Demon (Spec & Architecture)**: Maps codebase dependencies and generates clean technical specifications.
   2. **Maxwell's Demon (Surgical Code Build)**: Synthesizes precise, fence-wrapped production code without conversational noise.
   3. **Descartes' Demon (Root-Cause QA & Repair)**: Runs local `pytest` test suites and iteratively fixes failed assertions using terminal traceback logs.
+* ⚡ **Persistent GPU Pod Speed & State**: Hosting the coding model on a dedicated GPU Pod (e.g. via vLLM or Ollama) keeps model weights hot in VRAM, eliminating serverless cold-start download delays and queue latency.
 * 🔁 **Closed-Loop Verification & Repair**: Programmatically executes unit tests via subprocess and loops up to 3 repair passes until all assertions pass.
 * 🛡️ **Supply-Chain Guarded Skill Discovery**: Dynamically searches, scores, and ingests modular skill sheets (e.g. Anthropic's official skill library) using fuzzy keyword matching and strict trusted-repository allowlists.
-* 🎨 **Interactive Terminal Interface**: Built with `rich` featuring syntax-highlighted diff previews, live polling spinners, and color-coded persona announcements.
+* 🎨 **Interactive Terminal Interface**: Built with `rich` featuring syntax-highlighted diff previews, live status spinners, and color-coded persona announcements.
 
 ---
 
@@ -39,7 +40,7 @@ flowchart TD
     Classify -->|Chat / Casual| LocalLLM[Local Ollama: qwen3:8b]
     Classify -->|Coding Task| Laplace[Laplace's Demon: Technical Spec]
 
-    subgraph Cloud Pipeline - RunPod Serverless
+    subgraph Dedicated GPU Pod - vLLM / OpenAI API
         Laplace --> Maxwell[Maxwell's Demon: Code Synthesis]
     end
 
@@ -63,7 +64,7 @@ flowchart TD
    ```bash
    ollama pull qwen3:8b
    ```
-3. **RunPod Serverless GPU** endpoint running a coding LLM (e.g. `qwen/qwen3.6-27b-fp8`).
+3. A **Persistent GPU Pod** (RunPod GPU Instance, local server, or remote vLLM/OpenAI-compatible server) hosting your larger coding model (e.g. `qwen/qwen3.6-27b-fp8` or `qwen3:27b`).
 
 ### Installation
 
@@ -88,14 +89,15 @@ flowchart TD
    ```
 
 4. **Configure Environment Variables**:
-   Copy `.env.example` to `.env` and fill in your keys:
+   Copy `.env.example` to `.env` and fill in your details:
    ```bash
    cp .env.example .env
    ```
    Edit `.env`:
    ```ini
-   RUNPOD_ENDPOINT_ID=your_runpod_endpoint_id
-   RUNPOD_API_KEY=your_runpod_api_key
+   CLOUD_API_URL=http://your-gpu-pod-ip:8000/v1/chat/completions
+   CLOUD_API_KEY=your_optional_api_key
+   CLOUD_MODEL_NAME=qwen/qwen3.6-27b-fp8
    OLLAMA_MODEL=qwen3:8b
    ```
 
