@@ -1,0 +1,32 @@
+Run: 20261109T182438Z-add-a-json-flag-to-orch-usage-that-print
+Goal: Add a --json flag to `orch usage` that prints the per-agent summary as JSON instead of the text table.
+Test command: uv run pytest -q
+Assumptions:
+  - JSON shape: {"days": <int>, "since": <ISO-8601 UTC string>, "agents": [{"agent", "calls", "tokens", "failures"}, ...]}; with no logged calls, agents is an empty list.
+  - With --json, nothing else is printed (no 'Usage, last N day(s)' header, no '(no calls logged)' line), so the output parses directly with json.loads.
+  - Uses stdlib json and dataclasses.asdict; no new dependencies.
+  - The option variable is named json_out to match the existing `ask --json` convention.
+
+1. [s1] Add --json option to the usage command
+   In src/orch/cli.py, the `usage` command (around line 77) currently takes only `days` and prints a text table built from `summary(since)` (budget.AgentSummary dataclasses: agent, calls, tokens, failures). Add `json_out: bool = typer.Option(False, "--json", help="Print the summary as JSON.")`, following the same pattern as `ask --json`. When json_out is True, print one JSON document via typer.echo(json.dumps(..., indent=2)) shaped as {"days": days, "since": since.isoformat(timespec="seconds"), "agents": [dataclasses.asdict(r) for r in rows]}, then return without printing the header, table or '(no calls logged)' line. When json_out is False, keep the existing table output exactly as it is. Add `import json` and `from dataclasses import asdict` (stdlib) at the top of cli.py. Update the docstring to mention --json.
+   depends on: none
+   files: src/orch/cli.py, tests/test_budget_cli.py
+   acceptance: In tests/test_budget_cli.py add: (1) test_cli_usage_json: patch the adapter with FakeAdapter, run `ask --agent claude --prompt hi` once, then invoke `usage --days 1 --json`; assert exit_code 0, json.loads(res.output) succeeds, data['days'] == 1, and data['agents'] == [{'agent': 'claude', 'calls': 1, 'tokens': 15, 'failures': 0}]. (2) test_cli_usage_json_empty: with no calls logged, `usage --json` returns exit 0 and json.loads(res.output)['agents'] == []. The existing test_cli_usage still passes unchanged. `uv run pytest -q` is green.
+   risk flags: none
+[s1] Add --json option to the usage command: running builder
+[s1] reviewing
+[s1] review: approve (0 blocking, 0 minor)
+[s1] done ba363d52
+
+Run: 20261109T182438Z-add-a-json-flag-to-orch-usage-that-print  status: done
+Branch: orch/20261109T182438Z-add-a-json-flag-to-orch-usage-that-print  Worktree: C:\Users\aidil\AppData\Local\orch\wt\orch\20261109T182438Z-add-a-json-flag-to-orch-usage-that-print
+step  status                tokens  tests       rounds  review   commit    title
+s1    done                  206514  pass        0       approve  ba363d52  Add --json option to the usage command
+      tokens by role: builder=120257, reviewer=86257
+      review (round 0): approve; 0 blocking, 0 minor
+Needs from you:
+  orch diff 20261109T182438Z-add-a-json-flag-to-orch-usage-that-print --repo orch   # review, then: orch merge 20261109T182438Z-add-a-json-flag-to-orch-usage-that-print --repo orch
+
+Result: done (None): all steps done
+Next: orch diff 20261109T182438Z-add-a-json-flag-to-orch-usage-that-print --repo orch   # review, then: orch merge 20261109T182438Z-add-a-json-flag-to-orch-usage-that-print --repo orch
+exit 0
