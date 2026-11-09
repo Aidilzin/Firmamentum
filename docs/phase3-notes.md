@@ -32,12 +32,24 @@ claude -p --output-format json --model sonnet --json-schema <build.json>
 - Exit codes of `exec`/`resume`/`run`: 0 done, 1 failed, 2 needs input / approval / precondition error, 3 paused.
 
 ## Real check
-(not run yet; waiting for approval)
+`uv run orch exec 20261109T172814Z-add-an-orch-version-command-that-prints` (the Phase 2 `orch version` plan, builder = sonnet, model `claude-sonnet-5-5`). Exit 0, both steps done, no rate limit, no warnings, nothing stopped. Raw console output saved first.
+
+| step | status | builder tokens | turns | builder time | cost (list) | files changed (from git) | tests | commit |
+|---|---|---|---|---|---|---|---|---|
+| s1 Version helper module | done | 86,888 | 8 | 87.5 s | $0.135 | `src/orch/versions.py`, `tests/test_versions.py` | pass (exit 0, 58.5 s) | `564ee1da` |
+| s2 `orch version` command | done | 84,458 | 9 | 78.6 s | $0.123 | `src/orch/cli.py`, `tests/test_version_cli.py` | pass (exit 0, 58.4 s) | `3fc6c88f` |
+
+- 2 builder calls, 171,346 tokens total (mostly cache: ~58k read + ~25k written per call).
+- Branch `orch/20261109T172814Z-add-an-orch-version-command-that-prints` in the main repo, worktree under `%LOCALAPPDATA%\orch\wt\orch\<run_id>`. The main checkout stayed clean (`git status` empty). Not merged, not pushed.
+- The orchestrator ran `uv run pytest -q` itself in the worktree each time (~58 s; it includes the whole suite and a first-time venv). Output shows a uv `VIRTUAL_ENV ... does not match the project environment path` warning on stderr, harmless but noisy.
+- `files_changed` from git matched the plan's files exactly, so the out-of-plan warning and the protected-path/dependency stops were not exercised for real (only in unit tests).
+- The builder returned a valid `structured_output` report both times (`blocked: false`).
+- Review of the diff is yours: versions.py (injectable runner, scrubbed env for claude, 15 s timeout) + the `version` command + 3 test files. The cli.py docstring edit is a small unrequested change (it lists `version`).
 
 ## Untested
 - Whether a chained command such as `uv run pytest; git push` gets past the `Bash(uv run pytest*)`-style allow rule. The post-checks (changed files from git, protected paths, dependency files) and the worktree are the backstop; `Bash(git *)` is also on the deny list.
-- Whether the real CLI honours `--tools` together with `--allowedTools` the way the help implies, and that denied tools really fail under `--permission-prompts none`.
-- Whether the real `--json-schema` makes the builder return a valid `BuildReport` when it also uses tools for many turns.
+- That denied tools really fail under `--permission-prompts none`: the real run never tried a denied command, so only the happy path (Read/Edit/Write + the test command) is proven to work with `--tools` + `--allowedTools`.
+- Builder behaviour when it cannot finish (`blocked: true`) or the tests fail: only exercised with the fake adapter.
 - Real rate-limit text during a build (the existing patterns are guesses).
 - `uv run pytest` inside a fresh worktree: it creates a `.venv` there (ignored in this repo). A target repo that does not gitignore its venv or caches could see them in `changed_files`; they would trigger out-of-plan warnings but not be committed unless they are among the files captured before the tests.
 - Non-Windows worktree root and process-group kill.
