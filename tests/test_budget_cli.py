@@ -96,3 +96,19 @@ def test_cli_usage(monkeypatch):
     runner.invoke(cli.app, ["ask", "--agent", "claude", "--prompt", "hi"])
     res = runner.invoke(cli.app, ["usage", "--days", "1"])
     assert res.exit_code == 0 and "claude" in res.output
+
+
+def test_cli_usage_json(monkeypatch):
+    _patch(monkeypatch, FakeAdapter())
+    runner.invoke(cli.app, ["ask", "--agent", "claude", "--prompt", "hi"])
+    res = runner.invoke(cli.app, ["usage", "--days", "1", "--json"])
+    assert res.exit_code == 0, res.output
+    data = json.loads(res.output)
+    assert data["days"] == 1
+    assert data["agents"] == [{"agent": "claude", "calls": 1, "tokens": 15, "failures": 0}]
+
+
+def test_cli_usage_json_empty():
+    res = runner.invoke(cli.app, ["usage", "--json"])
+    assert res.exit_code == 0, res.output
+    assert json.loads(res.output)["agents"] == []

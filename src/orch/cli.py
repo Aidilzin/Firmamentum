@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
@@ -74,10 +76,21 @@ def version() -> None:
 
 
 @app.command()
-def usage(days: int = typer.Option(7, "--days", help="Look back this many days.")) -> None:
-    """Print per-agent call, token and failure totals."""
+def usage(
+    days: int = typer.Option(7, "--days", help="Look back this many days."),
+    json_out: bool = typer.Option(False, "--json", help="Print the summary as JSON."),
+) -> None:
+    """Print per-agent call, token and failure totals (--json for JSON output)."""
     since = datetime.now(timezone.utc) - timedelta(days=days)
     rows = summary(since)
+    if json_out:
+        payload = {
+            "days": days,
+            "since": since.isoformat(timespec="seconds"),
+            "agents": [asdict(r) for r in rows],
+        }
+        typer.echo(json.dumps(payload, indent=2))
+        return
     typer.echo(f"Usage, last {days} day(s)")
     typer.echo(f"{'agent':<8}{'calls':>8}{'tokens':>12}{'failures':>10}")
     if not rows:
