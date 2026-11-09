@@ -1,0 +1,55 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    },
+    "files_changed": {
+      "description": "Paths relative to the working directory.",
+      "items": {
+        "type": "string"
+      },
+      "title": "Files Changed",
+      "type": "array"
+    },
+    "tests_added": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Tests Added",
+      "type": "array"
+    },
+    "blocked": {
+      "description": "True only if the step could not be completed.",
+      "title": "Blocked",
+      "type": "boolean"
+    },
+    "question": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Required when blocked is true, otherwise null.",
+      "title": "Question"
+    },
+    "notes": {
+      "title": "Notes",
+      "type": "string"
+    }
+  },
+  "required": [
+    "summary",
+    "files_changed",
+    "tests_added",
+    "blocked",
+    "question",
+    "notes"
+  ],
+  "title": "BuildReport",
+  "type": "object"
+}

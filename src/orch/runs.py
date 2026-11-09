@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -11,7 +12,8 @@ from pathlib import Path
 from .plan import Plan
 from .planner import PlannerOutcome
 
-STATUSES = ("planned", "needs_input", "failed")
+STATUSES = ("planned", "needs_input", "failed", "executing", "paused", "awaiting_approval", "done")
+STEP_STATES = ("pending", "running", "done", "failed", "needs_input", "awaiting_approval")
 
 
 class RunNotFound(LookupError):
@@ -93,6 +95,20 @@ def _read_meta(d: Path) -> dict | None:
         return json.loads((d / "meta.json").read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def load_meta(run_dir: Path) -> dict:
+    m = _read_meta(run_dir)
+    if m is None:
+        raise RunNotFound(f"no readable meta.json in {run_dir}")
+    return m
+
+
+def write_meta(run_dir: Path, meta: dict) -> None:
+    """Atomic write (tmp + replace) so a crash never leaves a half-written meta.json."""
+    tmp = run_dir / "meta.json.tmp"
+    _dump(tmp, meta)
+    os.replace(tmp, run_dir / "meta.json")
 
 
 def list_runs(repo: Path) -> list[RunInfo]:
