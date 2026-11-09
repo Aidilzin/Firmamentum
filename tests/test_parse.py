@@ -95,3 +95,20 @@ def test_failure_kinds(adapter):
     assert adapter.parse_output(out(timed_out=True, rc=1), REQ).error_kind is ErrorKind.TIMEOUT
     r = adapter.parse_output(ProcessOutput(not_found=True, error="no exe"), REQ)
     assert r.error_kind is ErrorKind.NOT_FOUND
+
+
+def test_claude_structured_output_fixture():
+    r = ClaudeCodeAdapter().parse_output(out(fixture_text("claude_schema.json")), REQ)
+    assert r.ok
+    assert r.structured == {"answer": "PONG", "items": [{"id": "a", "n": 1}, {"id": "b", "n": 2}]}
+
+
+def test_agy_structured_output_fixture():
+    r = AntigravityAdapter().parse_output(out(fixture_text("agy_schema.json")), REQ)
+    assert r.ok
+    assert r.structured == {"answer": "PONG", "items": [{"id": "a", "n": 1}, {"id": "b", "n": 2}]}
+
+
+def test_structured_is_none_without_schema():
+    assert ClaudeCodeAdapter().parse_output(out(fixture_text("claude_pong.json")), REQ).structured is None
+    assert AntigravityAdapter().parse_output(out(fixture_text("agy_pong.json")), REQ).structured is None

@@ -21,3 +21,13 @@ Decisions for the Planner:
 - agy scout: `--mode plan`, instructions inside the prompt.
 - `--system-prompt-snapshot` is on by default: on `--resume` the first system prompt is reused, so a retry via resume keeps the planner text.
 - Caveat: on Windows a long `--append-system-prompt` is part of argv (32k limit). `planner.md` must stay well under that.
+
+## Step 0c: json-schema live check (nested schema with `$defs`/`$ref`)
+Schema: object with `answer: string` and `items: array of $ref Item{id, n}`. Prompt asked for answer PONG and two items.
+- **Both CLIs accept the schema inline** (`--json-schema '<json>'`) on Windows, `$defs`/`$ref` included. No need to inline refs or use a temp file. (agy would also accept a file path.)
+- **Both return the parsed object in a top-level `structured_output` key**; `result` (claude) / `response` (agy) holds the same JSON as text. Added `AgentResult.structured`.
+- agy also echoes the schema back under `json_schema`.
+- claude: 24,054 tokens (nearly all cache creation), 2 turns (`num_turns: 2`, `stop_reason: tool_use` on the first). agy: 13,464 tokens.
+- Not proven: that the CLIs *enforce* the schema when the model would otherwise deviate. Both complied on a trivial prompt. The planner still validates with pydantic and retries.
+- Fixtures: `fixtures/claude_schema.json` is the exact raw stdout. `fixtures/agy_schema.json` was re-serialized from the parsed JSON (indent=2) because the first run printed it instead of saving stdout; content is identical, bytes are not.
+- Real calls this step: claude x2 (the first output was truncated by my own print, so I repeated it with your OK), agy x1.

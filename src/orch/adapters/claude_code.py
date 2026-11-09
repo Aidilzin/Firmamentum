@@ -21,6 +21,11 @@ class CommandSpec:
     stdin_text: str | None
 
 
+def _structured(data: dict) -> dict | None:
+    s = data.get("structured_output")
+    return s if isinstance(s, dict) else None
+
+
 class ClaudeCodeAdapter(AgentAdapter):
     name = "claude"
 
@@ -57,6 +62,7 @@ class ClaudeCodeAdapter(AgentAdapter):
             ok=True,
             error_kind=ErrorKind.OK,
             text=text,
+            structured=_structured(data),
             session_id=data.get("session_id"),
             model=next(iter(models), None) or "",
             duration_ms=int(data.get("duration_ms") or out.elapsed_ms),

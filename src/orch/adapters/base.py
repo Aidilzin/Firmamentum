@@ -53,6 +53,7 @@ class AgentResult(BaseModel):
     ok: bool
     error_kind: ErrorKind
     text: str = ""
+    structured: dict | None = None  # parsed --json-schema result, when the CLI returns one
     session_id: str | None = None
     model: str | None = None
     duration_ms: int = 0

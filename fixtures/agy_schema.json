@@ -1,0 +1,62 @@
+{
+  "conversation_id": "2ad3f914-f38a-43fb-beb1-784b818b1c45",
+  "status": "SUCCESS",
+  "response": "{\"answer\":\"PONG\",\"items\":[{\"id\":\"a\",\"n\":1},{\"id\":\"b\",\"n\":2}]}\n",
+  "duration_seconds": 7.6343509,
+  "num_turns": 1,
+  "structured_output": {
+    "answer": "PONG",
+    "items": [
+      {
+        "id": "a",
+        "n": 1
+      },
+      {
+        "id": "b",
+        "n": 2
+      }
+    ]
+  },
+  "json_schema": {
+    "type": "object",
+    "properties": {
+      "answer": {
+        "type": "string"
+      },
+      "items": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/Item"
+        }
+      }
+    },
+    "required": [
+      "answer",
+      "items"
+    ],
+    "$defs": {
+      "Item": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "n": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "n"
+        ]
+      }
+    }
+  },
+  "usage": {
+    "input_tokens": 13374,
+    "output_tokens": 90,
+    "thinking_tokens": 46,
+    "cache_read_tokens": 0,
+    "total_tokens": 13464
+  }
+}

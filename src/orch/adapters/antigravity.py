@@ -63,6 +63,7 @@ class AntigravityAdapter(AgentAdapter):
             ok=True,
             error_kind=ErrorKind.OK,
             text=text,
+            structured=data["structured_output"] if isinstance(data.get("structured_output"), dict) else None,
             session_id=data.get("conversation_id"),
             model=request.model,  # agy's JSON does not report the model
             duration_ms=int(round(float(duration_s) * 1000)) if duration_s is not None else out.elapsed_ms,
