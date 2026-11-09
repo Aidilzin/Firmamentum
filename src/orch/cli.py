@@ -1,4 +1,4 @@
-"""orch command line: `orch ask` and `orch usage`."""
+"""orch command line: ask, usage, plan, runs, show."""
 
 from __future__ import annotations
 
@@ -11,6 +11,10 @@ import typer
 
 from .adapters import AgentAdapter, AgentRequest, AntigravityAdapter, ClaudeCodeAdapter
 from .budget import run_agent, summary
+from .config import ConfigError, apply_overrides, load_config, resolve_repo
+from .plan import format_plan
+from .planner import make_plan
+from .runs import RunNotFound, create_run, find_run, list_runs, load_plan, save_outcome
 
 app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.", no_args_is_help=True)
 
@@ -69,6 +73,74 @@ def usage(days: int = typer.Option(7, "--days", help="Look back this many days."
         typer.echo("(no calls logged)")
     for r in rows:
         typer.echo(f"{r.agent:<8}{r.calls:>8}{r.tokens:>12}{r.failures:>10}")
+
+
+def _repo_or_exit(cfg, repo_arg):
+    try:
+        return resolve_repo(cfg, repo_arg)
+    except ConfigError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2)
+
+
+@app.command()
+def plan(
+    request: str = typer.Argument(..., help="What you want done."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
+    scout: bool = typer.Option(False, "--scout", help="Run the scout role first (costs extra quota)."),
+    model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
+) -> None:
+    """Ask the Planner for a plan and store it under .orch/runs/."""
+    try:
+        cfg = apply_overrides(load_config(), model or [])
+    except ConfigError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2)
+    target = _repo_or_exit(cfg, repo)
+    run_dir = create_run(target.path, request)
+    outcome = make_plan(request, target, cfg, lambda name: get_adapter(AgentName(name)), use_scout=scout)
+    models = {r: f"{cfg.roles[r].agent}:{cfg.roles[r].model or 'default'}" for r in (["scout"] if scout else []) + ["planner"]}
+    meta = save_outcome(run_dir, outcome, models)
+    typer.echo(f"Run: {run_dir.name}")
+    if outcome.plan is None:
+        typer.echo(f"Error: {outcome.error}", err=True)
+        typer.echo(f"Details: {run_dir / 'planner_raw.json'}  [{outcome.total_tokens} tokens]", err=True)
+        raise typer.Exit(1)
+    typer.echo(format_plan(outcome.plan))
+    typer.echo(f"\n[{meta['status']} | {outcome.total_tokens} tokens | {len(outcome.results)} call(s)]")
+    if outcome.plan.needs_input:
+        raise typer.Exit(2)
+
+
+@app.command()
+def runs(repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path.")) -> None:
+    """List stored runs, newest first."""
+    target = _repo_or_exit(load_config(), repo)
+    items = list_runs(target.path)
+    if not items:
+        typer.echo("(no runs)")
+    for r in items:
+        typer.echo(f"{r.run_id:<60} {r.status:<12} {r.created[:19].replace('T', ' ')}")
+
+
+@app.command()
+def show(
+    run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
+    repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path."),
+) -> None:
+    """Print a stored plan."""
+    target = _repo_or_exit(load_config(), repo)
+    try:
+        d = find_run(target.path, run_id)
+    except RunNotFound as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(1)
+    stored = load_plan(d)
+    typer.echo(f"Run: {d.name}")
+    if stored is None:
+        typer.echo("(no plan stored: the run failed or is incomplete)")
+        raise typer.Exit(1)
+    typer.echo(format_plan(stored))
 
 
 if __name__ == "__main__":

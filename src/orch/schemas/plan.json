@@ -1,0 +1,126 @@
+{
+  "$defs": {
+    "Step": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "description": "Step id: \"s1\", \"s2\", ...",
+          "pattern": "^s[0-9]+$",
+          "title": "Id",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        },
+        "description": {
+          "description": "What to change and why, enough for a builder with no other context.",
+          "title": "Description",
+          "type": "string"
+        },
+        "files": {
+          "description": "Files expected to change or be created.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Files",
+          "type": "array"
+        },
+        "depends_on": {
+          "description": "Ids of steps that must finish first.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Depends On",
+          "type": "array"
+        },
+        "acceptance": {
+          "description": "How we know it is done: tests to add or pass.",
+          "title": "Acceptance",
+          "type": "string"
+        },
+        "risk_flags": {
+          "description": "Only the approval rules that apply to this step.",
+          "items": {
+            "enum": [
+              "merge_to_main",
+              "delete_outside_worktree",
+              "touches_auth_payments_secrets_env",
+              "db_migration_or_schema",
+              "new_dependency",
+              "tests_fail_after_3_repairs",
+              "plan_needs_input",
+              "all_agents_rate_limited"
+            ],
+            "type": "string"
+          },
+          "title": "Risk Flags",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "description",
+        "files",
+        "depends_on",
+        "acceptance",
+        "risk_flags"
+      ],
+      "title": "Step",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "goal": {
+      "title": "Goal",
+      "type": "string"
+    },
+    "assumptions": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Assumptions",
+      "type": "array"
+    },
+    "needs_input": {
+      "title": "Needs Input",
+      "type": "boolean"
+    },
+    "question": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Required when needs_input is true, otherwise null.",
+      "title": "Question"
+    },
+    "test_command": {
+      "title": "Test Command",
+      "type": "string"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/Step"
+      },
+      "maxItems": 8,
+      "title": "Steps",
+      "type": "array"
+    }
+  },
+  "required": [
+    "goal",
+    "assumptions",
+    "needs_input",
+    "question",
+    "test_command",
+    "steps"
+  ],
+  "title": "Plan",
+  "type": "object"
+}

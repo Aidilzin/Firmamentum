@@ -1,0 +1,18 @@
+roles:
+  planner:  { agent: claude, model: opus }
+  scout:    { agent: agy,    model: null }   # null = agy default
+  builder:  { agent: claude, model: sonnet }
+  reviewer: { agent: claude, model: opus }
+  repair:   { agent: claude, model: sonnet }
+fallback_model: { claude: sonnet }
+approval_rules:
+  - merge_to_main
+  - delete_outside_worktree
+  - touches_auth_payments_secrets_env
+  - db_migration_or_schema
+  - new_dependency
+  - tests_fail_after_3_repairs
+  - plan_needs_input
+  - all_agents_rate_limited
+repos:
+  orch: { path: ".", test_command: "uv run pytest -q" }

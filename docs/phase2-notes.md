@@ -17,7 +17,7 @@
 | Misc useful | `--fallback-model`, `--max-budget-usd`, `--effort`, `--add-dir`, `--system-prompt-snapshot` | `--effort`, `--add-dir`, `--print-timeout`, `--settings` |
 
 Decisions for the Planner:
-- claude: `--tools Read,Grep,Glob --permission-mode plan --permission-prompts none`, role text via `--append-system-prompt`, schema via `--json-schema`.
+- claude: `--tools Read,Grep,Glob --permission-prompts none`, role text via `--append-system-prompt`, schema via `--json-schema`. `--permission-mode plan` is deliberately NOT used: the toolset is already read-only, and plan mode brings its own ExitPlanMode flow that could fight the structured-output reply. Untested which is safer; revisit if a real plan call misbehaves.
 - agy scout: `--mode plan`, instructions inside the prompt.
 - `--system-prompt-snapshot` is on by default: on `--resume` the first system prompt is reused, so a retry via resume keeps the planner text.
 - Caveat: on Windows a long `--append-system-prompt` is part of argv (32k limit). `planner.md` must stay well under that.
@@ -31,3 +31,29 @@ Schema: object with `answer: string` and `items: array of $ref Item{id, n}`. Pro
 - Not proven: that the CLIs *enforce* the schema when the model would otherwise deviate. Both complied on a trivial prompt. The planner still validates with pydantic and retries.
 - Fixtures: `fixtures/claude_schema.json` is the exact raw stdout. `fixtures/agy_schema.json` was re-serialized from the parsed JSON (indent=2) because the first run printed it instead of saving stdout; content is identical, bytes are not.
 - Real calls this step: claude x2 (the first output was truncated by my own print, so I repeated it with your OK), agy x1.
+
+## Design decisions
+- **One validation path.** `Plan.model_validate` checks shape and the step graph (unique ids, known deps, no self-dependency, no cycles, question iff needs_input, 1..8 steps unless needs_input). `src/orch/schemas/plan.json` is generated from the model (`uv run python -m orch.plan`) and a test fails if they drift. `$defs`/`$ref` are kept as pydantic emits them (both CLIs accept them).
+- `risk_flags` is an enum of the 8 approval rules; `config.approval_rules` is validated against the same list, so a typo in config.yaml fails loudly.
+- **Planner flow** (`planner.py`): optional scout (agy `--mode plan`) -> planner call (claude, `--tools Read,Grep,Glob`, `--permission-prompts none`, `planner.md` via `--append-system-prompt`, schema inline) -> parse `structured` (fallback: JSON from text, fences tolerated) -> validate -> on failure ONE retry. Retry resumes the session with the validation errors; if the resumed call itself fails to run, it falls back to a fresh call containing the prompt, the bad output and the errors. So worst case is 3 calls, never more than 1 *validation* retry. Agent errors (rate limit etc.) are not retried.
+- For an agy planner the role text goes in the prompt (agy has no system-prompt flag).
+- Scout is read-only via `--mode plan` only; agy has no tool allow-list, so that mode is the only guard.
+- Runs live in `<repo>/.orch/runs/<UTC timestamp>-<slug>/` (collision gets `-2`); `.orch/` is already gitignored here. `orch runs/show` accept `--repo` and unique run-id prefixes. Failed runs keep `planner_raw.json` but have no `plan.json`.
+- Config: `ORCH_CONFIG` env var overrides the config path (used by tests); default is `config.yaml` next to `src/` (works for the editable install only). Relative repo paths resolve against the config file's directory. `--repo` defaults to the current directory, with the configured test command if that directory is a configured repo.
+- `--model role=model` changes only the model, never the agent.
+- Reported by `orch plan`: run id, plan in execution order, status, total tokens (all calls, scout included), number of calls.
+
+## Real check
+`uv run orch plan "Add an \`orch version\` command ..."` on this repo, planner = claude opus, no scout.
+- 1 call, valid on the first try, 22.5 s, 11 turns (file reads), model `claude-opus-5-5`, **87,485 tokens** (8 input, 2,265 output, 57,220 cache read, 27,992 cache write), $0.28 list cost.
+- Plan: 2 steps (versions helper module with injectable runner, then the typer command), each with tests, no risk flags, sensible assumptions (importlib.metadata, `--version` costs no quota, 15 s timeout, scrubbed env for claude). Not implemented, per instructions.
+- The run id timestamp is UTC, so it can look a day behind local time.
+
+## Untested
+- Retry via real `--resume` (only the fake path is tested); the real retry on a bad plan never happened.
+- Whether the CLIs enforce the schema on a model that wants to deviate.
+- `--scout` with real agy; agy as planner.
+- Whether `agy --mode plan` really blocks edits (taken from help text).
+- Windows argv limit with a very long `--append-system-prompt` (planner.md is ~3 KB).
+- Whether `agy --version` exists (the plan from the real check assumes it; the implementation is not built).
+- Non-default config path and running `orch` from outside the repo checkout.
