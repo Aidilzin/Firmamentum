@@ -1,4 +1,4 @@
-"""orch command line: ask, usage, plan, runs, show, exec, run, resume, status, diff, clean."""
+"""orch command line: ask, usage, version, plan, runs, show, exec, run, resume, status, diff, clean."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import typer
 from .adapters import AgentAdapter, AgentRequest, AntigravityAdapter, ClaudeCodeAdapter
 from .budget import run_agent, summary
 from .config import ConfigError, apply_overrides, load_config, resolve_repo
-from . import workspace
+from . import versions, workspace
 from .executor import ExecError, ExecOutcome, Executor
 from .plan import format_plan
 from .planner import make_plan
@@ -62,6 +62,14 @@ def ask(
     if not result.ok:
         typer.echo(f"Error: {result.error_kind.value}", err=True)
         raise typer.Exit(1)
+
+
+@app.command()
+def version() -> None:
+    """Print orch, claude and agy versions."""
+    typer.echo(f"orch {versions.orch_version()}")
+    for name in ("claude", "agy"):
+        typer.echo(f"{name}: {versions.cli_version(name)}")
 
 
 @app.command()
