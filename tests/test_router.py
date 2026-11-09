@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -21,7 +22,7 @@ from orch.runs import load_meta
 
 runner = CliRunner()
 CFG = load_config()
-NOW = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 11, 10, 12, 0, 0, tzinfo=timezone.utc)  # 20:00 in Asia/Singapore
 
 
 def rl(text="usage limit reached", agent="claude"):
@@ -128,8 +129,57 @@ def test_parse_clock_time_is_next_local_occurrence():
     got, parsed = parse_reset_time("Your limit resets at 5am", NOW, 60)
     local = got.astimezone()
     assert parsed and (local.hour, local.minute) == (5, 0) and NOW < got <= NOW + timedelta(days=1)
-    got, parsed = parse_reset_time("resets at 3:30 PM (Europe/London)", NOW, 60)
+    got, parsed = parse_reset_time("resets at 3:30 PM", NOW, 60)
     assert parsed and (got.astimezone().hour, got.astimezone().minute) == (15, 30)
+
+
+SGT = timezone(timedelta(hours=8))
+
+
+def _have_zone(name):
+    try:
+        ZoneInfo(name)
+        return True
+    except Exception:  # no tzdata on Windows unless the tzdata package is installed
+        return False
+
+
+@pytest.mark.skipif(not _have_zone("Asia/Singapore"), reason="no tz database (tzdata) available")
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        # Claude Code /usage: no "at", optional date, optional tz name in brackets. NOW = 20:00 SGT on Nov 10.
+        ("Resets 4:59am (Asia/Singapore)", datetime(2026, 11, 11, 4, 59, tzinfo=SGT)),
+        ("Resets 9pm (Asia/Singapore)", datetime(2026, 11, 10, 21, 0, tzinfo=SGT)),
+        ("Resets Nov 12, 7:59pm (Asia/Singapore)", datetime(2026, 11, 12, 19, 59, tzinfo=SGT)),
+        ("Resets November 12, 7:59pm (Asia/Singapore)", datetime(2026, 11, 12, 19, 59, tzinfo=SGT)),
+        ("Session limit reached. resets at 5am (Asia/Singapore)", datetime(2026, 11, 11, 5, 0, tzinfo=SGT)),
+    ],
+)
+def test_parse_usage_screen_formats_with_named_zone(text, expected):
+    got, parsed = parse_reset_time(text, NOW, 60)
+    assert parsed and got == expected
+
+
+def test_parse_usage_screen_time_only_shapes_any_zone():
+    # an unresolvable zone name falls back to the machine's zone, so these hold on any machine
+    for text, hm in (("Resets 4:59am (Nowhere/Land)", (4, 59)), ("Resets 9pm (Nowhere/Land)", (21, 0)), ("Resets 4:59am", (4, 59))):
+        got, parsed = parse_reset_time(text, NOW, 60)
+        assert parsed and (got.astimezone().hour, got.astimezone().minute) == hm, text
+        assert NOW < got <= NOW + timedelta(days=1)
+
+
+def test_parse_usage_screen_date_shapes_any_zone():
+    for text in ("Resets Nov 12, 7:59pm (Nowhere/Land)", "Resets November 12, 7:59pm", "resets Nov 12 7:59pm (Nowhere/Land)"):
+        got, parsed = parse_reset_time(text, NOW, 60)
+        local = got.astimezone()
+        assert parsed and (local.month, local.day, local.hour, local.minute) == (11, 12, 19, 59), text
+
+
+def test_parse_usage_screen_bad_dates_fall_back():
+    for text in ("Resets Foo 12, 7:59pm", "Resets Nov 40, 7:59pm", "Resets Dec 30, 7:59pm (Nowhere/Land)"):
+        assert parse_reset_time(text, NOW, 60) == (NOW + timedelta(minutes=60), False), text
+
 
 
 @pytest.mark.parametrize(

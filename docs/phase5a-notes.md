@@ -33,7 +33,7 @@ call_role(role, build_req, get_adapter, cfg)
 ## Cooldowns (`budget.py`, same SQLite file)
 - Table `cooldowns(agent, model, until_utc, reason, created)`, primary key (agent, model). `model='*'` = every model of the agent. Writing the same key keeps the later `until_utc`.
 - Scope: one model is cooled only if the message names exactly one model **and it is the model the failed call used**. A different model, several, or none cools `<agent>:*`. claude families: opus, sonnet, haiku (substring match, so `opus` and `claude-opus-*` agree). agy: single-model only for an explicit model whose name appears in the message; `agy:default` always cools `agy:*`.
-- Until time (`router.parse_reset_time`), first believable match wins: ISO 8601 (naive = UTC), `|<epoch>`, `in/after N d/h/m/s` (several parts allowed), `resets at 5am` / `3:30 pm` / `17:00` (next local occurrence; a trailing time zone name is ignored). A time in the past or more than 8 days away is rejected. Otherwise `now + cooldown_minutes`. The raw message is stored in `reason` (500 chars).
+- Until time (`router.parse_reset_time`), first believable match wins: ISO 8601 (naive = UTC), `|<epoch>`, `in/after N d/h/m/s` (several parts allowed), `resets at 5am` / `3:30 pm` / `17:00`, and the Claude Code `/usage` shapes `Resets 4:59am (Asia/Singapore)` and `Resets Nov 12, 7:59pm (Asia/Singapore)` (no "at", optional month-day, optional zone name in brackets). The bracketed zone is used when `zoneinfo` can resolve it; otherwise (unknown name, or no `tzdata` on Windows) the machine's own zone is used. Next occurrence if no date is given. A time in the past or more than 8 days away is rejected. Otherwise `now + cooldown_minutes`. The raw message is stored in `reason` (500 chars).
 - Cooldowns are recorded by the router (it has the config), so `orch ask` does not record them.
 - Expiry is by time only. `orch cooldowns --clear [agent]` removes them early.
 
@@ -55,6 +55,7 @@ call_role(role, build_req, get_adapter, cfg)
 ## Untested live
 - **Real rate-limit messages and reset-time formats.** `RATE_LIMIT_PATTERNS` and every parser shape above are guesses from common wording; no real message was captured. Check `reason` in `orch cooldowns` after the first real limit.
 - Whether claude's message names the model for an Opus-only limit, and whether agy's quota errors name a model.
+- **`tzdata` is not installed in this venv**, so named zones fall back to the machine zone here (same result while this laptop is in Asia/Singapore). The named-zone tests skip without it; they pass with `uv run --with tzdata pytest`. Adding `tzdata` as a dependency would make zone names exact; not done without your OK.
 - Local-time handling of "resets at 5am" when the CLI's time zone differs from this machine's.
 - agy as reviewer after a claude fallback (still the Phase 4 untested path).
 - Whether a different model can resume another model's claude session (not attempted: it starts fresh).

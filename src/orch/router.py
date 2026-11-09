@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import budget
 from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind
@@ -25,7 +26,13 @@ _ISO_RE = re.compile(r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?(?:Z
 _EPOCH_RE = re.compile(r"\|(\d{10})\b")
 _REL_RE = re.compile(r"\b(?:in|after)\s+((?:\d+\s*[a-z]+[\s,]*(?:and\s+)?)+)", re.IGNORECASE)
 _REL_PART_RE = re.compile(r"(\d+)\s*(days?|d|hours?|hrs?|h|minutes?|mins?|m|seconds?|secs?|s)\b", re.IGNORECASE)
-_CLOCK_RE = re.compile(r"\bresets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b", re.IGNORECASE)
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
+# "resets at 5am", "Resets 4:59am (Asia/Singapore)", "Resets Nov 12, 7:59pm (Asia/Singapore)"
+_CLOCK_RE = re.compile(
+    r"\bresets?\s+(?:at\s+)?(?:([a-z]{3})[a-z]*\.?\s+(\d{1,2}),?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b"
+    r"(?:\s*\(([A-Za-z_]+(?:/[A-Za-z_+\-0-9]+)*)\))?",
+    re.IGNORECASE,
+)
 _UNIT = {"d": 86400, "h": 3600, "m": 60, "s": 1}
 
 
@@ -51,12 +58,27 @@ def _parse_relative(text: str, now: datetime) -> datetime | None:
     return now + timedelta(seconds=secs) if secs else None
 
 
+def _zone(name: str | None):
+    """The named time zone, or the machine's own when it is missing or unknown (zoneinfo needs tzdata on Windows)."""
+    if name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return now_local_tz()
+
+
+def now_local_tz():
+    return datetime.now().astimezone().tzinfo
+
+
 def _parse_clock(text: str, now: datetime) -> datetime | None:
     m = _CLOCK_RE.search(text)
     if not m:
         return None
-    hour, minute, ampm = int(m.group(1)), int(m.group(2) or 0), (m.group(3) or "").lower()
-    if not ampm and m.group(2) is None:
+    mon, day, h, mi, ampm_raw, tzname = m.groups()
+    hour, minute, ampm = int(h), int(mi or 0), (ampm_raw or "").lower()
+    if not ampm and mi is None:
         return None  # "resets 5" is not a time
     if ampm:
         if not 1 <= hour <= 12:
@@ -64,7 +86,21 @@ def _parse_clock(text: str, now: datetime) -> datetime | None:
         hour = hour % 12 + (12 if ampm == "pm" else 0)
     if hour > 23 or minute > 59:
         return None
-    local_now = now.astimezone()  # the machine's timezone
+    local_now = now.astimezone(_zone(tzname))
+    if mon:
+        if mon.lower() not in _MONTHS:
+            return None
+        try:
+            cand = local_now.replace(month=_MONTHS.index(mon.lower()) + 1, day=int(day), hour=hour, minute=minute,
+                                     second=0, microsecond=0)  # fmt: skip
+        except ValueError:
+            return None
+        if cand <= local_now:
+            try:
+                cand = cand.replace(year=cand.year + 1)
+            except ValueError:
+                return None
+        return cand
     cand = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
     if cand <= local_now:
         cand += timedelta(days=1)
