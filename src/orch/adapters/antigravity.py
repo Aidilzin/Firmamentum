@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .base import AgentAdapter, AgentRequest, AgentResult, ErrorKind
 from .common import agent_error, parse_process_json
-from .process import ProcessOutput, run_process
+from .process import ProcessOutput, child_env, run_process
 
 LONG_PROMPT_CHARS = 8000
 
@@ -18,7 +18,7 @@ LONG_PROMPT_CHARS = 8000
 class CommandSpec:
     argv: list[str]
     prompt_file: Path | None = None  # deleted after the call
-    env: dict[str, str] | None = None  # None = inherit the parent env unchanged
+    env: dict[str, str] | None = None  # parent env minus VIRTUAL_ENV*
 
 
 class AntigravityAdapter(AgentAdapter):
@@ -44,7 +44,7 @@ class AntigravityAdapter(AgentAdapter):
         argv += request.extra_args
         # -p must carry its prompt as "-p=<prompt>" and come last, or agy swallows the next token.
         argv.append(f"-p={prompt}")
-        return CommandSpec(argv=argv, prompt_file=prompt_file)
+        return CommandSpec(argv=argv, prompt_file=prompt_file, env=child_env())
 
     def parse_output(self, out: ProcessOutput, request: AgentRequest) -> AgentResult:
         data, failed = parse_process_json("agy", out, request.timeout_s)

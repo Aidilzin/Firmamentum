@@ -80,9 +80,11 @@ def env(tmp_path):
         rr = ResolvedRepo(name=name, path=repo, test_command=test_command)
         return run_dir, rr
 
-    def executor(run_dir, rr, actions, logs=None):
+    def executor(run_dir, rr, actions, logs=None, **cfg_over):
         fb = FakeBuilder(actions)
-        ex = Executor(rr, run_dir, load_config(), lambda n: fb, log=(logs.append if logs is not None else lambda m: None))
+        over = {"review": "off", "max_repair_rounds": 0, **cfg_over}  # Phase 3 behaviour unless a test opts in
+        cfg = load_config().model_copy(update=over)
+        ex = Executor(rr, run_dir, cfg, lambda n: fb, log=(logs.append if logs is not None else lambda m: None))
         return ex, fb
 
     return repo, setup, executor
@@ -246,12 +248,13 @@ def test_tests_fail_stops_and_saves_output(env):
     run_dir, rr = setup(test_command=FILE_CMD)
     ex, fb = executor(run_dir, rr, [edit({"src/s1.py": "x\n"}), edit({"ok.txt": "1"})])
     out = ex.start()
-    assert out.status == "failed" and out.step_id == "s1"
+    assert out.status == "awaiting_approval" and out.step_id == "s1"  # no repair rounds allowed here
     assert len(fb.requests) == 1  # s2 not attempted
     meta = load_meta(run_dir)
     s1 = meta["steps"]["s1"]
-    assert s1["status"] == "failed" and s1["tests"]["exit_code"] == 1 and not s1["tests"]["passed"]
-    assert s1["commit"] is None and meta["status"] == "failed" and meta["steps"]["s2"]["status"] == "pending"
+    assert s1["status"] == "awaiting_approval" and s1["tests"]["exit_code"] == 1 and not s1["tests"]["passed"]
+    assert s1["stage"] == "repairs_exhausted" and s1["rule"] == "tests_fail_after_3_repairs"
+    assert s1["commit"] is None and meta["status"] == "awaiting_approval" and meta["steps"]["s2"]["status"] == "pending"
     assert "[exit 1]" in (run_dir / "steps" / "s1" / "tests.txt").read_text(encoding="utf-8")
 
 
@@ -259,7 +262,7 @@ def test_pass_fail_is_decided_by_exit_code_not_by_the_report(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=FILE_CMD)
     ex, _ = executor(run_dir, rr, [edit({"src/s1.py": "x\n"}, rep=report(summary="all tests pass!", notes="green"))])
-    assert ex.start().status == "failed"
+    assert ex.start().status == "awaiting_approval"  # tests failed; the report claim is ignored
 
 
 def test_blocked_builder_sets_needs_input(env):
@@ -311,13 +314,13 @@ def test_resume_after_crash_resets_partial_edits(env):
     assert len(fb2.requests) == 1
 
 
-def test_resume_does_not_auto_continue_a_failed_step(env):
+def test_resume_does_not_auto_continue_a_stopped_step(env):
     repo, setup, executor = env
     run_dir, rr = setup(test_command=FILE_CMD)
     ex, _ = executor(run_dir, rr, [edit({"src/s1.py": "x\n"})])
-    assert ex.start().status == "failed"
+    assert ex.start().status == "awaiting_approval"
     ex2, fb2 = executor(run_dir, rr, [])
-    assert ex2.resume().status == "failed" and fb2.requests == []
+    assert ex2.resume().status == "awaiting_approval" and fb2.requests == []
 
 
 def test_steps_run_in_topological_order(env):
@@ -353,6 +356,7 @@ def test_cli_exec_status_diff_clean(env, tmp_path, monkeypatch):
     repo, setup, executor = env
     data = yaml.safe_load(open(default_config_path(), encoding="utf-8"))
     data["repos"] = {"demo": {"path": str(repo), "test_command": PASS_CMD}}
+    data.update(review="off", max_repair_rounds=0)
     cfgfile = tmp_path / "config.yaml"
     cfgfile.write_text(yaml.safe_dump(data), encoding="utf-8")
     monkeypatch.setenv("ORCH_CONFIG", str(cfgfile))
@@ -382,6 +386,7 @@ def test_cli_exit_codes(env, tmp_path, monkeypatch):
     repo, setup, executor = env
     data = yaml.safe_load(open(default_config_path(), encoding="utf-8"))
     data["repos"] = {"demo": {"path": str(repo), "test_command": PASS_CMD}}
+    data.update(review="off", max_repair_rounds=0)
     cfgfile = tmp_path / "config.yaml"
     cfgfile.write_text(yaml.safe_dump(data), encoding="utf-8")
     monkeypatch.setenv("ORCH_CONFIG", str(cfgfile))

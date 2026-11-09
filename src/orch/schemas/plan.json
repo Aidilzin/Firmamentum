@@ -49,6 +49,7 @@
               "db_migration_or_schema",
               "new_dependency",
               "tests_fail_after_3_repairs",
+              "tests_removed",
               "plan_needs_input",
               "all_agents_rate_limited"
             ],

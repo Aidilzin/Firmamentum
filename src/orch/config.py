@@ -17,6 +17,7 @@ RiskFlag = Literal[
     "db_migration_or_schema",
     "new_dependency",
     "tests_fail_after_3_repairs",
+    "tests_removed",
     "plan_needs_input",
     "all_agents_rate_limited",
 ]
@@ -36,6 +37,7 @@ class RepoConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str
     test_command: str
+    retest_command: str | None = None  # repair rounds only; never from a plan
 
 
 class Config(BaseModel):
@@ -44,6 +46,8 @@ class Config(BaseModel):
     fallback_model: dict[str, str] = {}
     approval_rules: list[RiskFlag]
     repos: dict[str, RepoConfig] = {}
+    review: Literal["per_step", "off"] = "per_step"
+    max_repair_rounds: int = 3
     base_dir: Path = Path(".")  # directory of config.yaml; relative repo paths resolve against it
 
     @model_validator(mode="after")
@@ -59,6 +63,7 @@ class ResolvedRepo(BaseModel):
     name: str | None
     path: Path
     test_command: str | None  # None for an unconfigured path: the planner proposes one
+    retest_command: str | None = None
 
 
 def default_config_path() -> Path:
@@ -103,11 +108,11 @@ def resolve_repo(cfg: Config, name_or_path: str | None) -> ResolvedRepo:
     """`None` means the current directory. A configured name wins over a path of the same text."""
     if name_or_path and name_or_path in cfg.repos:
         r = cfg.repos[name_or_path]
-        return ResolvedRepo(name=name_or_path, path=(cfg.base_dir / r.path).resolve(), test_command=r.test_command)
+        return ResolvedRepo(name=name_or_path, path=(cfg.base_dir / r.path).resolve(), test_command=r.test_command, retest_command=r.retest_command)
     path = Path(name_or_path).resolve() if name_or_path else Path.cwd().resolve()
     if not path.is_dir():
         raise ConfigError(f"repo {name_or_path!r} is neither a configured name nor an existing directory")
     for name, r in cfg.repos.items():
         if (cfg.base_dir / r.path).resolve() == path:
-            return ResolvedRepo(name=name, path=path, test_command=r.test_command)
+            return ResolvedRepo(name=name, path=path, test_command=r.test_command, retest_command=r.retest_command)
     return ResolvedRepo(name=None, path=path, test_command=None)

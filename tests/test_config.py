@@ -9,7 +9,7 @@ def test_repo_config_loads():
     assert cfg.roles["planner"].agent == "claude" and cfg.roles["planner"].model == "opus"
     assert cfg.roles["scout"].agent == "agy" and cfg.roles["scout"].model is None
     assert cfg.fallback_model == {"claude": "sonnet"}
-    assert len(cfg.approval_rules) == 8
+    assert len(cfg.approval_rules) == 9
     assert cfg.repos["orch"].test_command == "uv run pytest -q"
 
 

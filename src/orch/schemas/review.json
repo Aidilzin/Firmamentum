@@ -1,0 +1,80 @@
+{
+  "$defs": {
+    "Issue": {
+      "additionalProperties": false,
+      "properties": {
+        "severity": {
+          "enum": [
+            "blocker",
+            "major",
+            "minor"
+          ],
+          "title": "Severity",
+          "type": "string"
+        },
+        "file": {
+          "title": "File",
+          "type": "string"
+        },
+        "line": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Line number, or null if not tied to one line.",
+          "title": "Line"
+        },
+        "problem": {
+          "title": "Problem",
+          "type": "string"
+        },
+        "fix": {
+          "title": "Fix",
+          "type": "string"
+        }
+      },
+      "required": [
+        "severity",
+        "file",
+        "line",
+        "problem",
+        "fix"
+      ],
+      "title": "Issue",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "verdict": {
+      "enum": [
+        "approve",
+        "reject"
+      ],
+      "title": "Verdict",
+      "type": "string"
+    },
+    "issues": {
+      "items": {
+        "$ref": "#/$defs/Issue"
+      },
+      "title": "Issues",
+      "type": "array"
+    },
+    "summary": {
+      "title": "Summary",
+      "type": "string"
+    }
+  },
+  "required": [
+    "verdict",
+    "issues",
+    "summary"
+  ],
+  "title": "Review",
+  "type": "object"
+}

@@ -12,7 +12,10 @@ approval_rules:
   - db_migration_or_schema
   - new_dependency
   - tests_fail_after_3_repairs
+  - tests_removed
   - plan_needs_input
   - all_agents_rate_limited
+review: per_step          # per_step | off
+max_repair_rounds: 3
 repos:
-  orch: { path: ".", test_command: "uv run pytest -q" }
+  orch: { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }

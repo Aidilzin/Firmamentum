@@ -15,6 +15,15 @@ IS_WINDOWS = sys.platform == "win32"
 STDERR_TAIL_CHARS = 2000
 
 
+VENV_VARS = ("VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT")
+
+
+def child_env(extra_scrub: tuple[str, ...] = ()) -> dict[str, str]:
+    """Env for every child process orch starts: the parent env minus venv markers (and `extra_scrub`)."""
+    drop = {*VENV_VARS, *extra_scrub}
+    return {k: v for k, v in os.environ.items() if k not in drop}
+
+
 @dataclass
 class ProcessOutput:
     stdout: str = ""

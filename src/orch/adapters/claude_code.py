@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import dataclass
 
 from .base import AgentAdapter, AgentRequest, AgentResult, ErrorKind
 from .common import agent_error, parse_process_json
-from .process import ProcessOutput, run_process
+from .process import ProcessOutput, child_env, run_process
 
 # Removed so claude always uses the Pro login instead of billing an API key.
 SCRUBBED_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
@@ -38,7 +37,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         if request.resume_id:  # untested against the real CLI
             argv += ["--resume", request.resume_id]
         argv += request.extra_args
-        env = {k: v for k, v in os.environ.items() if k not in SCRUBBED_ENV}
+        env = child_env(SCRUBBED_ENV)
         return CommandSpec(argv=argv, env=env, stdin_text=request.prompt)
 
     def parse_output(self, out: ProcessOutput, request: AgentRequest) -> AgentResult:

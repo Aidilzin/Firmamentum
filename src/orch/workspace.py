@@ -158,3 +158,71 @@ def remove(repo: Path, repo_name: str, run_id: str, path: Path | None = None) ->
     git(Path(repo), "worktree", "remove", "--force", str(wt))
     git(Path(repo), "worktree", "prune", check=False)
     return True
+
+
+# ---------- test-removal scan ----------
+
+_TEST_FILE_RE = re.compile(r"(^|/)(tests?|__tests__)/|(^|/)test_[^/]*$|_test\.[a-z]+$|\.(test|spec)\.[a-z]+$", re.IGNORECASE)
+_PY_TEST_RE = re.compile(r"^\s*(?:async\s+)?def\s+(test\w*)\s*\(")
+_JS_TEST_RE = re.compile(r"""^\s*(?:it|test)\s*\(\s*['"`]([^'"`]+)['"`]""")
+
+
+def is_test_path(path: str) -> bool:
+    return bool(_TEST_FILE_RE.search(path.replace("\\", "/")))
+
+
+def _test_name(line: str) -> str | None:
+    for rx in (_PY_TEST_RE, _JS_TEST_RE):
+        m = rx.match(line)
+        if m:
+            return m.group(1)
+    return None
+
+
+def removed_tests(wt: Path) -> list[str]:
+    """Existing tests the working tree removed vs HEAD: deleted test files (`path`) and removed test
+    functions (`path::name`, only when no test of that name was added back in the same file)."""
+    found: list[str] = []
+    status = git(wt, "diff", "HEAD", "--name-status", "--no-renames").stdout
+    for line in status.splitlines():
+        code, _, path = line.partition("\t")
+        if code.startswith("D") and is_test_path(path):
+            found.append(path)
+    removed: dict[str, set[str]] = {}
+    added: dict[str, set[str]] = {}
+    current: str | None = None
+    for line in git(wt, "diff", "HEAD", "-U0", "--no-color", "--no-renames").stdout.splitlines():
+        if line.startswith("+++ "):
+            current = line[6:] if line.startswith("+++ b/") else None
+        elif line.startswith("--- "):
+            continue
+        elif current and line[:1] in "+-" and is_test_path(current):
+            name = _test_name(line[1:])
+            if name:
+                (removed if line[0] == "-" else added).setdefault(current, set()).add(name)
+    for path, names in removed.items():
+        found += [f"{path}::{n}" for n in sorted(names - added.get(path, set()))]
+    return sorted(set(found))
+
+
+# ---------- merge ----------
+
+
+def current_branch(repo: Path) -> str | None:
+    """Current branch name, or None for a detached HEAD."""
+    out = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+    return (out.stdout.strip() or None) if out.returncode == 0 else None
+
+
+def branch_exists(repo: Path, branch: str) -> bool:
+    return git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False).returncode == 0
+
+
+def merge_no_ff(repo: Path, branch: str, message: str) -> str:
+    """`git merge --no-ff` into the current branch. On conflict the merge is aborted and WorkspaceError raised."""
+    repo = Path(repo)
+    p = git(repo, *_identity_args(repo), "merge", "--no-ff", "-m", message, branch, check=False)
+    if p.returncode != 0:
+        git(repo, "merge", "--abort", check=False)
+        raise WorkspaceError(f"merge of {branch} failed and was aborted: {(p.stderr or p.stdout).strip()[:500]}")
+    return git(repo, "rev-parse", "HEAD").stdout.strip()
