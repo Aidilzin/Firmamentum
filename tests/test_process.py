@@ -27,6 +27,13 @@ def test_non_ascii_stdin_roundtrip(tmp_path):
     assert o.stdout == "café ✓ 日本語"
 
 
+def test_stdin_newlines_are_not_translated(tmp_path):
+    code = "import sys; print(repr(sys.stdin.buffer.read()))"
+    o = run_process([sys.executable, "-c", code], cwd=tmp_path, stdin_text="a\nb\n\nc", timeout_s=30)
+    assert "\\r" not in o.stdout  # repr() would show an escaped \r
+    assert "a\\nb\\n\\nc" in o.stdout
+
+
 def test_invalid_utf8_is_replaced_not_raised(tmp_path):
     code = "import sys; sys.stdout.buffer.write(bytes([111, 107, 32, 255, 254]))"
     o = run_process([sys.executable, "-c", code], cwd=tmp_path, timeout_s=30)

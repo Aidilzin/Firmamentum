@@ -75,8 +75,6 @@ def run_process(
             stdin=subprocess.PIPE if stdin_text is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="replace",
             **kwargs,
         )
     except FileNotFoundError as e:
@@ -88,7 +86,9 @@ def run_process(
         return out
 
     try:
-        stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout_s)
+        # Binary pipes: encode stdin ourselves so Windows never turns LF into CRLF.
+        stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
+        stdout, stderr = proc.communicate(input=stdin_bytes, timeout=timeout_s)
         out.returncode = proc.returncode
     except subprocess.TimeoutExpired:
         out.timed_out = True
@@ -96,9 +96,9 @@ def run_process(
         try:
             stdout, stderr = proc.communicate(timeout=10)
         except Exception:  # pipes held by orphans; give up on the remaining output
-            stdout, stderr = "", ""
+            stdout, stderr = b"", b""
         out.returncode = proc.returncode
-    out.stdout = stdout or ""
-    out.stderr = stderr or ""
+    out.stdout = (stdout or b"").decode("utf-8", errors="replace")
+    out.stderr = (stderr or b"").decode("utf-8", errors="replace")
     out.elapsed_ms = int((time.perf_counter() - t0) * 1000)
     return out
