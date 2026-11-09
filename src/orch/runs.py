@@ -76,7 +76,10 @@ def save_outcome(
         "models": models,
         "total_tokens": outcome.total_tokens,
         "error": outcome.error,
+        "routing": outcome.routes,
     }
+    if outcome.resume_after is not None:
+        meta["resume_after"] = outcome.resume_after.astimezone(timezone.utc).isoformat(timespec="seconds")
     _dump(run_dir / "meta.json", meta)
     return meta
 

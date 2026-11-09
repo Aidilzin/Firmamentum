@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 ROLE_NAMES = ("planner", "scout", "builder", "reviewer", "repair")
 RiskFlag = Literal[
@@ -27,10 +27,32 @@ class ConfigError(ValueError):
     pass
 
 
-class RoleConfig(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class Entry(BaseModel):
+    """One routing choice: an agent plus a model (None = the CLI's default model)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
     agent: Literal["claude", "agy"]
-    model: str | None = None  # None = the CLI's default model
+    model: str | None = None
+
+    @property
+    def label(self) -> str:
+        return f"{self.agent}:{self.model or 'default'}"
+
+
+RoleConfig = Entry  # old name
+
+
+def parse_entry(value: object) -> Entry:
+    """`claude:opus`, `agy:default`, bare `claude`, or the old {agent, model} mapping."""
+    if isinstance(value, Entry):
+        return value
+    if isinstance(value, str):
+        agent, _, model = value.strip().partition(":")
+        model = model.strip()
+        return Entry(agent=agent.strip(), model=None if model in ("", "default") else model)  # type: ignore[arg-type]
+    if isinstance(value, dict):
+        return Entry(**value)
+    raise ValueError(f"bad role entry {value!r}; expected 'agent:model'")
 
 
 class RepoConfig(BaseModel):
@@ -42,13 +64,25 @@ class RepoConfig(BaseModel):
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    roles: dict[str, RoleConfig]
-    fallback_model: dict[str, str] = {}
+    roles: dict[str, list[Entry]]
+    fallback_model: dict[str, str] = {}  # superseded by role lists; accepted and ignored
+    cooldown_minutes: int = 60
     approval_rules: list[RiskFlag]
     repos: dict[str, RepoConfig] = {}
     review: Literal["per_step", "off"] = "per_step"
     max_repair_rounds: int = 3
     base_dir: Path = Path(".")  # directory of config.yaml; relative repo paths resolve against it
+
+    @field_validator("roles", mode="before")
+    @classmethod
+    def _parse_roles(cls, v: object) -> object:
+        if not isinstance(v, dict):
+            return v
+        out = {}
+        for role, items in v.items():
+            items = items if isinstance(items, list) else [items]  # old single-entry form
+            out[role] = [parse_entry(i) for i in items]
+        return out
 
     @model_validator(mode="after")
     def _check_roles(self) -> Config:
@@ -56,6 +90,13 @@ class Config(BaseModel):
         unknown = [r for r in self.roles if r not in ROLE_NAMES]
         if missing or unknown:
             raise ValueError(f"roles: missing {missing}, unknown {unknown}")
+        for role, entries in self.roles.items():
+            if not entries:
+                raise ValueError(f"roles.{role}: needs at least one entry")
+        for role in ("builder", "repair"):
+            bad = [e.label for e in self.roles[role] if e.agent != "claude"]
+            if bad:
+                raise ValueError(f"roles.{role}: only claude entries allowed (agy has no tool allow-list), got {bad}")
         return self
 
 
@@ -91,8 +132,8 @@ def load_config(path: Path | None = None) -> Config:
 
 
 def apply_overrides(cfg: Config, overrides: list[str]) -> Config:
-    """Apply `role=model` strings. Returns a new Config; the agent of a role is unchanged."""
-    roles = {k: v.model_copy() for k, v in cfg.roles.items()}
+    """Apply `role=model` strings: that model goes first for the role's first agent. Returns a new Config."""
+    roles = {k: list(v) for k, v in cfg.roles.items()}
     for item in overrides:
         role, sep, model = item.partition("=")
         role, model = role.strip(), model.strip()
@@ -100,7 +141,8 @@ def apply_overrides(cfg: Config, overrides: list[str]) -> Config:
             raise ConfigError(f"bad --model value {item!r}; expected role=model, e.g. planner=sonnet")
         if role not in roles:
             raise ConfigError(f"unknown role {role!r} in --model; valid roles: {', '.join(ROLE_NAMES)}")
-        roles[role].model = model
+        first = Entry(agent=roles[role][0].agent, model=model)
+        roles[role] = [first] + [e for e in roles[role] if e != first]
     return cfg.model_copy(update={"roles": roles})
 
 

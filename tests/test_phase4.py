@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from test_executor import FILE_CMD, PASS_CMD, FakeBuilder, edit, env, fail, report  # noqa: F401  (env is a fixture)
 from typer.testing import CliRunner
 
-from orch import cli, review as review_mod, workspace
+from orch import budget, cli, review as review_mod, workspace
 from orch.adapters import AntigravityAdapter, ClaudeCodeAdapter, AgentRequest
 from orch.adapters.base import AgentResult, ErrorKind
 from orch.adapters.process import child_env
@@ -252,11 +252,15 @@ def test_review_off_never_calls_reviewer(env):
 def test_rate_limit_in_review_pauses_and_resumes_in_place(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))
-    ex, _ = executor(run_dir, rr, [edit({"a.py": "1\n"}), fail(ErrorKind.RATE_LIMITED)], **ON)
+    # opus is limited -> claude:* cools -> the one allowed hop goes to agy:default, which is limited too -> pause
+    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"}), fail(ErrorKind.RATE_LIMITED), fail(ErrorKind.RATE_LIMITED)], **ON)
     out = ex.start()
     assert out.status == "paused"
+    assert fb.requests[2].extra_args[:2] == ["--mode", "plan"]
+    assert load_meta(run_dir)["resume_after"]
     s1 = load_meta(run_dir)["steps"]["s1"]
     assert s1["status"] == "pending" and s1["resume_phase"] == "review"
+    budget.clear_cooldowns()
     ex2, fb2 = executor(run_dir, rr, [review("approve")], **ON)
     assert ex2.resume().status == "done"
     assert len(fb2.requests) == 1 and is_review_call(fb2.requests[0])  # the builder did not run again
@@ -269,6 +273,7 @@ def test_rate_limit_in_repair_pauses_and_resumes_in_place(env):
     ex, _ = executor(run_dir, rr, [edit({"a.py": "1\n"}), fail(ErrorKind.RATE_LIMITED)], review="off", max_repair_rounds=3)
     assert ex.start().status == "paused"
     assert load_meta(run_dir)["steps"]["s1"]["resume_phase"] == "need_repair"
+    budget.clear_cooldowns()
     ex2, fb2 = executor(run_dir, rr, [edit({"ok.txt": "1"})], review="off", max_repair_rounds=3)
     assert ex2.resume().status == "done"
     s1 = load_meta(run_dir)["steps"]["s1"]

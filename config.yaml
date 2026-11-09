@@ -1,10 +1,10 @@
 roles:
-  planner:  { agent: claude, model: opus }
-  scout:    { agent: agy,    model: null }   # null = agy default
-  builder:  { agent: claude, model: sonnet }
-  reviewer: { agent: claude, model: opus }
-  repair:   { agent: claude, model: sonnet }
-fallback_model: { claude: sonnet }
+  planner:  [claude:opus, claude:sonnet]
+  scout:    [agy:default]            # agy:default = agy with no --model
+  builder:  [claude:sonnet]          # builder and repair: claude only
+  reviewer: [claude:opus, claude:sonnet, agy:default]
+  repair:   [claude:sonnet]
+cooldown_minutes: 60
 approval_rules:
   - merge_to_main
   - delete_outside_worktree

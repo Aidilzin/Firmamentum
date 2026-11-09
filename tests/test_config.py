@@ -6,9 +6,10 @@ from orch.config import ConfigError, apply_overrides, default_config_path, load_
 
 def test_repo_config_loads():
     cfg = load_config(default_config_path().parent / "config.yaml")
-    assert cfg.roles["planner"].agent == "claude" and cfg.roles["planner"].model == "opus"
-    assert cfg.roles["scout"].agent == "agy" and cfg.roles["scout"].model is None
-    assert cfg.fallback_model == {"claude": "sonnet"}
+    assert [e.label for e in cfg.roles["planner"]] == ["claude:opus", "claude:sonnet"]
+    assert [e.label for e in cfg.roles["scout"]] == ["agy:default"] and cfg.roles["scout"][0].model is None
+    assert [e.label for e in cfg.roles["reviewer"]] == ["claude:opus", "claude:sonnet", "agy:default"]
+    assert cfg.cooldown_minutes == 60
     assert len(cfg.approval_rules) == 9
     assert cfg.repos["orch"].test_command == "uv run pytest -q"
 
@@ -16,9 +17,11 @@ def test_repo_config_loads():
 def test_overrides_are_applied_and_repeatable():
     cfg = load_config()
     new = apply_overrides(cfg, ["planner=sonnet", "scout=gemini-x"])
-    assert new.roles["planner"].model == "sonnet"
-    assert new.roles["scout"].model == "gemini-x"
-    assert cfg.roles["planner"].model == "opus"  # original untouched
+    assert [e.label for e in new.roles["planner"]] == ["claude:sonnet", "claude:opus"]  # sonnet first, duplicate dropped
+    assert [e.label for e in new.roles["scout"]] == ["agy:gemini-x", "agy:default"]
+    r = apply_overrides(cfg, ["reviewer=haiku"])
+    assert [e.label for e in r.roles["reviewer"]] == ["claude:haiku", "claude:opus", "claude:sonnet", "agy:default"]
+    assert cfg.roles["planner"][0].model == "opus"  # original untouched
 
 
 @pytest.mark.parametrize("bad", ["planner", "planner=", "=sonnet", "nobody=sonnet"])
@@ -46,7 +49,7 @@ def test_missing_role_rejected(tmp_path):
 
 def test_unknown_agent_and_rule_rejected(tmp_path):
     d = _valid()
-    d["roles"]["planner"]["agent"] = "gpt"
+    d["roles"]["planner"] = ["gpt:x"]
     with pytest.raises(ConfigError):
         load_config(_write(tmp_path, d))
     d = _valid()
@@ -74,3 +77,36 @@ def test_resolve_repo_by_name_and_path(tmp_path):
     assert resolve_repo(cfg, str(other)).test_command is None
     with pytest.raises(ConfigError):
         resolve_repo(cfg, str(tmp_path / "missing"))
+
+
+def test_old_single_entry_form_still_loads(tmp_path):
+    d = _valid()
+    d["roles"] = {
+        "planner": {"agent": "claude", "model": "opus"},
+        "scout": {"agent": "agy", "model": None},
+        "builder": {"agent": "claude", "model": "sonnet"},
+        "reviewer": {"agent": "claude", "model": "opus"},
+        "repair": {"agent": "claude", "model": "sonnet"},
+    }
+    d["fallback_model"] = {"claude": "sonnet"}
+    cfg = load_config(_write(tmp_path, d))
+    assert [e.label for e in cfg.roles["planner"]] == ["claude:opus"]
+    assert [e.label for e in cfg.roles["scout"]] == ["agy:default"]
+
+
+@pytest.mark.parametrize("role", ["builder", "repair"])
+def test_agy_rejected_for_builder_and_repair(tmp_path, role):
+    d = _valid()
+    d["roles"][role] = ["claude:sonnet", "agy:default"]
+    with pytest.raises(ConfigError, match=role):
+        load_config(_write(tmp_path, d))
+    d["roles"][role] = {"agent": "agy", "model": None}
+    with pytest.raises(ConfigError, match=role):
+        load_config(_write(tmp_path, d))
+
+
+def test_empty_role_list_rejected(tmp_path):
+    d = _valid()
+    d["roles"]["scout"] = []
+    with pytest.raises(ConfigError, match="scout"):
+        load_config(_write(tmp_path, d))

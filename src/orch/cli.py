@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -12,7 +13,8 @@ from typing import Optional
 import typer
 
 from .adapters import AgentAdapter, AgentRequest, AntigravityAdapter, ClaudeCodeAdapter
-from .budget import run_agent, summary
+from . import budget
+from .budget import run_agent, summary, summary_by_model
 from .config import ConfigError, apply_overrides, load_config, resolve_repo
 from . import versions, workspace
 from .executor import ExecError, ExecOutcome, Executor
@@ -78,25 +80,91 @@ def version() -> None:
 @app.command()
 def usage(
     days: int = typer.Option(7, "--days", help="Look back this many days."),
+    window: Optional[str] = typer.Option(None, "--window", help="Look back this long instead, e.g. 5h, 24h, 7d, 30m."),
     json_out: bool = typer.Option(False, "--json", help="Print the summary as JSON."),
 ) -> None:
-    """Print per-agent call, token and failure totals (--json for JSON output)."""
-    since = datetime.now(timezone.utc) - timedelta(days=days)
+    """Print call, token and failure totals per agent and model (--json for JSON output)."""
+    now = datetime.now(timezone.utc)
+    if window is not None:
+        try:
+            delta = parse_window(window)
+        except ValueError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(2)
+        label = window
+    else:
+        delta, label = timedelta(days=days), f"{days} day(s)"
+    since = now - delta
     rows = summary(since)
+    by_model = summary_by_model(since)
     if json_out:
         payload = {
             "days": days,
+            "window": window,
             "since": since.isoformat(timespec="seconds"),
             "agents": [asdict(r) for r in rows],
+            "models": [asdict(r) for r in by_model],
         }
         typer.echo(json.dumps(payload, indent=2))
         return
-    typer.echo(f"Usage, last {days} day(s)")
-    typer.echo(f"{'agent':<8}{'calls':>8}{'tokens':>12}{'failures':>10}")
-    if not rows:
+    typer.echo(f"Usage, last {label}")
+    typer.echo(f"{'agent':<8}{'model':<22}{'calls':>8}{'tokens':>12}{'failures':>10}")
+    if not by_model:
         typer.echo("(no calls logged)")
-    for r in rows:
-        typer.echo(f"{r.agent:<8}{r.calls:>8}{r.tokens:>12}{r.failures:>10}")
+    for r in by_model:
+        typer.echo(f"{r.agent:<8}{r.model:<22}{r.calls:>8}{r.tokens:>12}{r.failures:>10}")
+
+
+def parse_window(text: str) -> timedelta:
+    m = re.fullmatch(r"\s*(\d+)\s*([mhd])\s*", text.lower())
+    if not m or int(m.group(1)) == 0:
+        raise ValueError(f"bad --window {text!r}; use a number and m, h or d, e.g. 5h, 24h, 7d")
+    n, unit = int(m.group(1)), m.group(2)
+    key = {"m": "minutes", "h": "hours", "d": "days"}[unit]
+    return timedelta(**{key: n})
+
+
+def _parse_utc(text: str | None) -> datetime | None:
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _local(dt: datetime) -> str:
+    return dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+
+
+@app.command()
+def cooldowns(
+    agent: Optional[AgentName] = typer.Argument(None, help="With --clear: only this agent."),
+    clear: bool = typer.Option(False, "--clear", help="Remove cooldowns (all, or only AGENT's)."),
+) -> None:
+    """List active cooldowns; --clear [agent] removes them (when you know the limit has reset)."""
+    if clear:
+        n = budget.clear_cooldowns(agent.value if agent else None)
+        typer.echo(f"Cleared {n} cooldown(s)" + (f" for {agent.value}." if agent else "."))
+        return
+    items = budget.active_cooldowns()
+    if not items:
+        typer.echo("(no active cooldowns)")
+    for c in items:
+        typer.echo(f"{c.agent}:{c.model if c.model != '*' else '*':<10} until {_local(c.until)}  {c.reason[:80]!r}")
+
+
+def _planned_models(outcome, cfg, roles: list[str]) -> dict[str, str]:
+    """Entry that actually served each role (falls back to the first configured entry when no call was made)."""
+    used = {r["role"]: r["entry"] for r in outcome.routes}
+    return {r: used.get(r) or cfg.roles[r][0].label for r in roles}
+
+
+def _planning_stopped(outcome) -> None:
+    """Print why planning stopped; exit 3 when it was a rate-limit pause, else 1."""
+    typer.echo(f"Error: {outcome.error}", err=True)
+    raise typer.Exit(3 if outcome.paused else 1)
 
 
 def _repo_or_exit(cfg, repo_arg):
@@ -123,13 +191,12 @@ def plan(
     target = _repo_or_exit(cfg, repo)
     run_dir = create_run(target.path, request)
     outcome = make_plan(request, target, cfg, lambda name: get_adapter(AgentName(name)), use_scout=scout)
-    models = {r: f"{cfg.roles[r].agent}:{cfg.roles[r].model or 'default'}" for r in (["scout"] if scout else []) + ["planner"]}
+    models = _planned_models(outcome, cfg, (["scout"] if scout else []) + ["planner"])
     meta = save_outcome(run_dir, outcome, models)
     typer.echo(f"Run: {run_dir.name}")
     if outcome.plan is None:
-        typer.echo(f"Error: {outcome.error}", err=True)
         typer.echo(f"Details: {run_dir / 'planner_raw.json'}  [{outcome.total_tokens} tokens]", err=True)
-        raise typer.Exit(1)
+        _planning_stopped(outcome)
     typer.echo(format_plan(outcome.plan))
     typer.echo(f"\n[{meta['status']} | {outcome.total_tokens} tokens | {len(outcome.results)} call(s)]")
     if outcome.plan.needs_input:
@@ -225,9 +292,18 @@ def next_commands(run_dir: Path, repo_name: str | None = None) -> list[str]:
 def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
     meta = load_meta(run_dir)
     lines = [f"Run: {run_dir.name}  status: {meta.get('status')}"]
+    if meta.get("models"):
+        routed = {r["role"]: r for r in meta.get("routing") or []}
+        lines.append("Planning models: " + ", ".join(
+            f"{r}={m}" + (" (fallback)" if routed.get(r, {}).get("fallback") else "") for r, m in meta["models"].items()
+        ))
     ex = meta.get("exec")
     if ex:
         lines.append(f"Branch: {ex['branch']}  Worktree: {ex['worktree']}")
+    if meta.get("resume_after") and meta.get("status") == "paused":
+        after = _parse_utc(meta["resume_after"])
+        if after:
+            lines.append(f"Paused until {_local(after)}")
     if meta.get("merged_sha"):
         lines.append(f"Merged into {meta.get('merged_into')} as {meta['merged_sha'][:8]}")
     lines.append(f"{'step':<6}{'status':<19}{'tokens':>9}  {'tests':<12}{'rounds':<8}{'review':<9}{'commit':<10}title")
@@ -243,6 +319,10 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
         )
         if s.get("roles_tokens"):
             lines.append("      tokens by role: " + ", ".join(f"{r}={n}" for r, n in s["roles_tokens"].items()))
+        if s.get("roles_used"):
+            lines.append("      models used: " + ", ".join(
+                f"{r}={u['entry']}" + (" (fallback)" if u.get("fallback") else "") for r, u in s["roles_used"].items()
+            ))  # fmt: skip
         for r in s.get("rounds") or []:
             lines.append(f"      round {r['n']}: {'+'.join(r['reasons'])}; {r['session']}; review={r.get('verdict') or '-'}")
         for rv in reviews:
@@ -297,13 +377,20 @@ def exec_cmd(
 @app.command()
 def resume(
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
+    force: bool = typer.Option(False, "--force", help="Resume even if resume_after is still in the future."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
 ) -> None:
     """Continue a started run from its first unfinished step."""
     cfg = _load_cfg(model)
     target = _repo_or_exit(cfg, repo)
-    _drive(target, _find_or_exit(target, run_id), cfg, "resume")
+    run_dir = _find_or_exit(target, run_id)
+    meta = load_meta(run_dir)
+    after = _parse_utc(meta.get("resume_after")) if meta.get("status") == "paused" else None
+    if after is not None and after > datetime.now(timezone.utc) and not force:
+        typer.echo(f"Run is paused until {_local(after)} (usage limit). Use --force to try earlier.", err=True)
+        raise typer.Exit(3)
+    _drive(target, run_dir, cfg, "resume")
 
 
 @app.command()
@@ -322,12 +409,11 @@ def run(
     run_dir = create_run(target.path, request)
     outcome = make_plan(request, target, cfg, lambda name: get_adapter(AgentName(name)), use_scout=scout)
     roles = (["scout"] if scout else []) + ["planner"]
-    models = {r: f"{cfg.roles[r].agent}:{cfg.roles[r].model or 'default'}" for r in roles}
+    models = _planned_models(outcome, cfg, roles)
     save_outcome(run_dir, outcome, models)
     typer.echo(f"Run: {run_dir.name}")
     if outcome.plan is None:
-        typer.echo(f"Error: {outcome.error}", err=True)
-        raise typer.Exit(1)
+        _planning_stopped(outcome)
     typer.echo(format_plan(outcome.plan))
     if outcome.plan.needs_input:
         for n in next_commands(run_dir, target.name):
@@ -377,7 +463,7 @@ def _answer_plan(target, cfg, run_dir: Path, text: str) -> None:
             n += 1
         raw.rename(run_dir / f"planner_raw.{n}.json")
     outcome = make_plan(request + clarification, target, cfg, lambda name: get_adapter(AgentName(name)))
-    models = meta.get("models") or {"planner": f"{cfg.roles['planner'].agent}:{cfg.roles['planner'].model or 'default'}"}
+    models = meta.get("models") or _planned_models(outcome, cfg, ["planner"])
     new_meta = save_outcome(run_dir, outcome, models)
     new_meta["total_tokens"] += int(meta.get("total_tokens", 0))
     write_meta(run_dir, new_meta)

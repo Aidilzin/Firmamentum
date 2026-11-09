@@ -5,14 +5,15 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
 from pydantic import ValidationError
 
 from .adapters.base import AgentAdapter, AgentRequest, AgentResult
-from .budget import run_agent
-from .config import Config, ResolvedRepo, RoleConfig
+from .router import Routed, call_role
+from .config import Config, Entry, ResolvedRepo
 from .plan import Plan, load_schema_file
 
 ROLES_DIR = Path(__file__).parent / "roles"
@@ -41,6 +42,9 @@ class PlannerOutcome:
     attempts: list[Attempt]
     scout: AgentResult | None = None
     error: str | None = None  # set when plan is None
+    routes: list[dict] = field(default_factory=list)  # {role, entry, fallback} per call
+    paused: bool = False  # every entry for a role is rate limited / cooling
+    resume_after: datetime | None = None
 
     @property
     def results(self) -> list[AgentResult]:
@@ -118,7 +122,7 @@ def _build_prompt(
     return "\n".join(parts)
 
 
-def _agent_args(role: RoleConfig, system_text: str | None) -> tuple[list[str], str | None]:
+def _agent_args(role: Entry, system_text: str | None) -> tuple[list[str], str | None]:
     """(extra CLI args, text to put inline in the prompt). claude takes system text by flag; agy cannot."""
     args = read_only_args(role.agent)
     if system_text and role.agent == "claude":
@@ -126,12 +130,14 @@ def _agent_args(role: RoleConfig, system_text: str | None) -> tuple[list[str], s
     return args, system_text
 
 
-def run_scout(request: str, repo: ResolvedRepo, cfg: Config, get_adapter: AdapterFactory) -> AgentResult:
-    role = cfg.roles["scout"]
-    args, _ = _agent_args(role, None)
+def run_scout(request: str, repo: ResolvedRepo, cfg: Config, get_adapter: AdapterFactory) -> Routed:
     prompt = SCOUT_PROMPT + f"\n\nThe planner will work on this request (for focus only): {request}"
-    req = AgentRequest(prompt=prompt, cwd=repo.path, model=role.model, timeout_s=SCOUT_TIMEOUT_S, extra_args=args)
-    return run_agent(get_adapter(role.agent), req)
+
+    def build(entry: Entry) -> AgentRequest:
+        args, _ = _agent_args(entry, None)
+        return AgentRequest(prompt=prompt, cwd=repo.path, model=entry.model, timeout_s=SCOUT_TIMEOUT_S, extra_args=args)
+
+    return call_role("scout", build, get_adapter, cfg)
 
 
 def _feedback(errors: list[str]) -> str:
@@ -140,6 +146,18 @@ def _feedback(errors: list[str]) -> str:
         + "\n".join(f"- {e}" for e in errors)
         + "\n\nReturn the corrected, complete plan as JSON matching the schema."
     )
+
+
+def _note(outcome: PlannerOutcome, role: str, routed: Routed) -> None:
+    if routed.entry is not None:
+        outcome.routes.append({"role": role, "entry": routed.entry.label, "fallback": routed.fallback})
+
+
+def _pause(outcome: PlannerOutcome, role: str, routed: Routed) -> PlannerOutcome:
+    outcome.paused, outcome.resume_after = True, routed.resume_after
+    when = routed.resume_after.astimezone().strftime("%Y-%m-%d %H:%M %Z") if routed.resume_after else "unknown"
+    outcome.error = f"{role}: every entry is rate limited or cooling; try again after {when}"
+    return outcome
 
 
 def make_plan(
@@ -153,31 +171,45 @@ def make_plan(
     outcome = PlannerOutcome(plan=None, attempts=[])
     scout_text: str | None = None
     if use_scout:
-        outcome.scout = run_scout(request, repo, cfg, get_adapter)
+        routed = run_scout(request, repo, cfg, get_adapter)
+        _note(outcome, "scout", routed)
+        if routed.paused:
+            if routed.rate_limited is not None:
+                outcome.scout = routed.rate_limited
+            return _pause(outcome, "scout", routed)
+        outcome.scout = routed.result
         if not outcome.scout.ok:
             outcome.error = f"scout failed: {outcome.scout.error_kind.value}: {outcome.scout.text}"
             return outcome
         scout_text = outcome.scout.text
 
-    role = cfg.roles["planner"]
-    adapter = get_adapter(role.agent)
     schema = load_schema_file()
-    args, inline = _agent_args(role, planner_instructions())
-    prompt = _build_prompt(request, repo, cfg, scout_text, inline)
+    instructions = planner_instructions()
+    first_entry: list[Entry] = []  # the entry of the first planner call (a session id only works there)
 
-    def call(p: str, resume_id: str | None = None) -> AgentResult:
-        req = AgentRequest(
-            prompt=p,
-            cwd=repo.path,
-            model=role.model,
-            timeout_s=PLANNER_TIMEOUT_S,
-            json_schema=schema,
-            resume_id=resume_id,
-            extra_args=args,
-        )
-        return run_agent(adapter, req)
+    def base(inline: str | None) -> str:
+        return _build_prompt(request, repo, cfg, scout_text, inline)
 
-    first = call(prompt)
+    def call(make: Callable[[Entry, str | None], tuple[str, str | None]]) -> Routed:
+        """make(entry, inline_role_text) -> (prompt, resume_id); runs through the router."""
+
+        def build(entry: Entry) -> AgentRequest:
+            args, inline = _agent_args(entry, instructions)
+            p, resume_id = make(entry, inline)
+            return AgentRequest(prompt=p, cwd=repo.path, model=entry.model, timeout_s=PLANNER_TIMEOUT_S,
+                                json_schema=schema, resume_id=resume_id, extra_args=args)  # fmt: skip
+
+        routed = call_role("planner", build, get_adapter, cfg)
+        _note(outcome, "planner", routed)
+        return routed
+
+    first_routed = call(lambda e, inline: (base(inline), None))
+    if first_routed.paused:
+        if first_routed.rate_limited is not None:
+            outcome.attempts.append(Attempt(first_routed.rate_limited))
+        return _pause(outcome, "planner", first_routed)
+    first = first_routed.result
+    first_entry.append(first_routed.entry)
     if not first.ok:
         outcome.attempts.append(Attempt(first))
         outcome.error = f"planner failed: {first.error_kind.value}: {first.text}"
@@ -188,17 +220,33 @@ def make_plan(
         outcome.plan = plan
         return outcome
 
-    # One retry. Resume the session if there is one (resume is untested against the real CLIs);
-    # if the resumed call itself fails to run, fall back to a fresh call that includes the bad output.
+    previous = json.dumps(first.structured, indent=2) if first.structured is not None else first.text
+
+    def fresh(inline: str | None) -> str:
+        return f"{base(inline)}\n\n## Previous attempt (invalid)\n{previous}\n\n{_feedback(errors)}"
+
+    # One retry. Resume the session if there is one and the same entry is still usable (resume is untested
+    # against the real CLIs); if the resumed call itself fails to run, fall back to a fresh call.
     second: AgentResult | None = None
     if first.session_id:
-        second = call(_feedback(errors), resume_id=first.session_id)
+        resumed = call(
+            lambda e, inline: (_feedback(errors), first.session_id) if e == first_entry[0] else (fresh(inline), None)
+        )
+        if resumed.paused:
+            if resumed.rate_limited is not None:
+                outcome.attempts.append(Attempt(resumed.rate_limited))
+            return _pause(outcome, "planner", resumed)
+        second = resumed.result
         if not second.ok:
             outcome.attempts.append(Attempt(second, ["resume call failed: " + second.error_kind.value]))
             second = None
     if second is None:
-        previous = json.dumps(first.structured, indent=2) if first.structured is not None else first.text
-        second = call(f"{prompt}\n\n## Previous attempt (invalid)\n{previous}\n\n{_feedback(errors)}")
+        again = call(lambda e, inline: (fresh(inline), None))
+        if again.paused:
+            if again.rate_limited is not None:
+                outcome.attempts.append(Attempt(again.rate_limited))
+            return _pause(outcome, "planner", again)
+        second = again.result
     if not second.ok:
         outcome.attempts.append(Attempt(second))
         outcome.error = f"planner retry failed: {second.error_kind.value}: {second.text}"

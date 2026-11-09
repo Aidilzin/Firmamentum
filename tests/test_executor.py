@@ -6,7 +6,7 @@ from git_helpers import git, make_repo
 from plan_factory import good_plan, step
 from typer.testing import CliRunner
 
-from orch import cli, workspace
+from orch import budget, cli, workspace
 from orch.adapters.base import AgentAdapter, AgentResult, ErrorKind
 from orch.config import ResolvedRepo, default_config_path, load_config
 from orch.executor import ExecError, Executor, builder_args, build_prompt, is_dependency_file, is_protected, outside_plan
@@ -292,8 +292,11 @@ def test_rate_limited_pauses_and_resume_continues(env):
     assert out.status == "paused" and out.step_id == "s2"
     meta = load_meta(run_dir)
     assert meta["status"] == "paused" and meta["steps"]["s1"]["status"] == "done" and meta["steps"]["s2"]["status"] == "pending"
+    assert load_meta(run_dir)["resume_after"]
+    budget.clear_cooldowns()  # the limit has "reset"
     ex2, fb2 = executor(run_dir, rr, [edit({"src/s2.py": "b\n"})])
     assert ex2.resume().status == "done"
+    assert "resume_after" not in load_meta(run_dir)
     assert len(fb2.requests) == 1  # s1 not repeated
     assert load_meta(run_dir)["status"] == "done"
 

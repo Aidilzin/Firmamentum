@@ -30,6 +30,17 @@ CREATE TABLE IF NOT EXISTS calls (
 )
 """
 
+COOLDOWN_SCHEMA = """
+CREATE TABLE IF NOT EXISTS cooldowns (
+    agent TEXT NOT NULL,
+    model TEXT NOT NULL,          -- '*' = every model of the agent
+    until_utc TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created TEXT NOT NULL,
+    PRIMARY KEY (agent, model)
+)
+"""
+
 
 def default_db_path() -> Path:
     if sys.platform == "win32":
@@ -43,6 +54,7 @@ def _connect(db_path: Path | None) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.execute(SCHEMA)
+    conn.execute(COOLDOWN_SCHEMA)
     return conn
 
 
@@ -102,3 +114,92 @@ def summary(since: datetime, db_path: Path | None = None) -> list[AgentSummary]:
     finally:
         conn.close()
     return [AgentSummary(agent=a, calls=c, tokens=t, failures=f) for a, c, t, f in rows]
+
+
+@dataclass
+class ModelSummary:
+    agent: str
+    model: str
+    calls: int
+    tokens: int
+    failures: int
+
+
+def summary_by_model(since: datetime, db_path: Path | None = None) -> list[ModelSummary]:
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT agent, COALESCE(model,'default'), COUNT(*), COALESCE(SUM(total_tokens),0), COALESCE(SUM(1-ok),0)"
+            " FROM calls WHERE ts >= ? GROUP BY agent, COALESCE(model,'default') ORDER BY agent, 2",
+            (since.astimezone(timezone.utc).isoformat(timespec="seconds"),),
+        ).fetchall()
+    finally:
+        conn.close()
+    return [ModelSummary(a, m, c, t, f) for a, m, c, t, f in rows]
+
+
+# ---------- cooldowns ----------
+
+
+@dataclass
+class Cooldown:
+    agent: str
+    model: str  # '*' = all models of the agent
+    until: datetime  # UTC
+    reason: str
+    created: datetime
+
+
+def _iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def model_matches(cooldown_model: str, entry_model: str | None) -> bool:
+    """'*' matches everything; otherwise equal, or the cooldown name is a substring (opus ~ claude-opus-4)."""
+    if cooldown_model == "*":
+        return True
+    em = (entry_model or "default").lower()
+    cm = cooldown_model.lower()
+    return em == cm or (cm != "default" and cm in em)
+
+
+def record_cooldown(agent: str, model: str, until: datetime, reason: str, now: datetime | None = None,
+                    db_path: Path | None = None) -> None:  # fmt: skip
+    """Insert or replace; the later of an old and a new until_utc wins."""
+    now = now or datetime.now(timezone.utc)
+    conn = _connect(db_path)
+    try:
+        with conn:
+            old = conn.execute("SELECT until_utc FROM cooldowns WHERE agent=? AND model=?", (agent, model)).fetchone()
+            if old and datetime.fromisoformat(old[0]) > until:
+                until = datetime.fromisoformat(old[0])
+            conn.execute(
+                "INSERT OR REPLACE INTO cooldowns (agent, model, until_utc, reason, created) VALUES (?,?,?,?,?)",
+                (agent, model, _iso(until), reason[:500], _iso(now)),
+            )
+    finally:
+        conn.close()
+
+
+def active_cooldowns(now: datetime | None = None, db_path: Path | None = None) -> list[Cooldown]:
+    now = now or datetime.now(timezone.utc)
+    conn = _connect(db_path)
+    try:
+        rows = conn.execute("SELECT agent, model, until_utc, reason, created FROM cooldowns ORDER BY until_utc").fetchall()
+    finally:
+        conn.close()
+    out = [Cooldown(a, m, datetime.fromisoformat(u), r, datetime.fromisoformat(c)) for a, m, u, r, c in rows]
+    return [c for c in out if c.until > now]
+
+
+def clear_cooldowns(agent: str | None = None, db_path: Path | None = None) -> int:
+    conn = _connect(db_path)
+    try:
+        with conn:
+            cur = (conn.execute("DELETE FROM cooldowns WHERE agent=?", (agent,)) if agent
+                   else conn.execute("DELETE FROM cooldowns"))  # fmt: skip
+            return cur.rowcount
+    finally:
+        conn.close()

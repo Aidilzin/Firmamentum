@@ -14,20 +14,21 @@ import re
 import shlex
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
 from pydantic import ValidationError
 
 from . import workspace
-from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind
+from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind, failure
 from .adapters.process import child_env, run_process
 from . import review as review_mod
 from .build import BuildReport, load_schema_file
-from .budget import run_agent
-from .config import Config, ResolvedRepo
+from .config import Config, Entry, ResolvedRepo
 from .plan import Plan, Step
 from .planner import extract_json
+from .router import call_role
 from .runs import load_meta, load_plan, write_meta
 
 ROLES_DIR = Path(__file__).parent / "roles"
@@ -266,6 +267,8 @@ class Executor:
         self.test_command = ""
         self.retest_command: str | None = None
         self.wt: Path = Path()
+        self.last_entry: Entry | None = None  # entry that served the most recent agent call
+        self._resume_after: datetime | None = None
 
     # -- meta --
     def _save(self) -> None:
@@ -304,7 +307,7 @@ class Executor:
             raise ExecError(f"the plan needs input first: {self.plan.question}")
         self.meta = load_meta(self.run_dir)
         for role in ("builder", "repair"):
-            if self.cfg.roles[role].agent != "claude":
+            if any(e.agent != "claude" for e in self.cfg.roles[role]):
                 raise ExecError(f"the {role} role must use agent 'claude' (agy has no tool allow-list)")
 
     def _load_started(self, need_worktree: bool = True) -> None:
@@ -353,6 +356,7 @@ class Executor:
         if self.meta.get("status") == "done":
             return ExecOutcome("done", None, "already done")
         self.meta["status"] = "executing"
+        self.meta.pop("resume_after", None)
         self._save()
         return self._loop()
 
@@ -444,9 +448,17 @@ class Executor:
         self._save()
 
     # -- agent calls --
-    def _agent(self, sid: str, role_name: str, req: AgentRequest) -> AgentResult:
-        role = self.cfg.roles[role_name]
-        result = run_agent(self.get_adapter(role.agent), req)
+    def _agent(self, sid: str, role_name: str, build: Callable[[Entry], AgentRequest]) -> AgentResult:
+        """Run one role call through the router. If every usable entry is rate limited (or cooling) the returned
+        result is a RATE_LIMITED failure and `self._resume_after` says when to try again."""
+        routed = call_role(role_name, build, self.get_adapter, self.cfg)
+        self._resume_after = routed.resume_after if routed.paused else None
+        if routed.paused and routed.rate_limited is None:  # nothing was called: all entries already cooling
+            self.last_entry = None
+            return failure(self.cfg.roles[role_name][0].agent, ErrorKind.RATE_LIMITED, "all entries are in cooldown")
+        result = routed.rate_limited if routed.paused else routed.result
+        assert result is not None
+        self.last_entry = routed.entry
         st = self._st(sid)
         sdir = self.run_dir / "steps" / sid
         if role_name == "builder" and not (sdir / "builder_raw.json").exists():
@@ -457,8 +469,16 @@ class Executor:
         rt = st["roles_tokens"]
         rt[role_name] = rt.get(role_name, 0) + result.total_tokens
         upd: dict = {"tokens": st["tokens"] + result.total_tokens, "calls": st["calls"] + 1, "roles_tokens": rt}
-        if role_name in ("builder", "repair") and result.session_id:
+        if routed.entry is not None:
+            used = st.setdefault("roles_used", {})
+            used[role_name] = {"entry": routed.entry.label, "fallback": routed.fallback}
+            upd["roles_used"] = used
+            self.meta.setdefault("calls_log", []).append(
+                {"step": sid, "role": role_name, "entry": routed.entry.label, "fallback": routed.fallback}
+            )
+        if role_name in ("builder", "repair") and result.session_id and not routed.paused:
             upd["session_id"] = result.session_id
+            upd["session_entry"] = routed.entry.label if routed.entry else None
         self._set_step(sid, **upd)
         self.meta["exec_tokens"] = self.meta.get("exec_tokens", 0) + result.total_tokens
         by_role = self.meta.setdefault("role_tokens", {})
@@ -469,7 +489,11 @@ class Executor:
     def _agent_stop(self, sid: str, role_name: str, result: AgentResult, resume_phase: str | None) -> ExecOutcome:
         if result.error_kind == ErrorKind.RATE_LIMITED:
             self._set_step(sid, status="pending", error="rate limited", resume_phase=resume_phase)
-            return self._stop("paused", sid, "rate limited; run paused, `orch resume` later")
+            when = ""
+            if self._resume_after is not None:
+                self.meta["resume_after"] = self._resume_after.astimezone(timezone.utc).isoformat(timespec="seconds")
+                when = " after " + self._resume_after.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+            return self._stop("paused", sid, f"rate limited ({role_name}); run paused, `orch resume` later{when}")
         self._set_step(sid, status="failed", error=f"{result.error_kind.value}: {result.text}"[:500], stage=role_name,
                        resume_phase=None)  # fmt: skip
         return self._stop("failed", sid, f"{role_name} failed: {result.error_kind.value}")
@@ -496,16 +520,14 @@ class Executor:
         assert self.plan is not None
         sid = step.id
         steps = self.meta["steps"]
-        role = self.cfg.roles["builder"]
         done_titles = [steps[s.id]["title"] for s in self.plan.topo_order() if steps[s.id]["status"] == "done"]
-        req = AgentRequest(
-            prompt=build_prompt(self.plan, step, done_titles, self.test_command, self._st(sid)["answers"]),
-            cwd=self.wt,
-            model=role.model,
-            timeout_s=BUILDER_TIMEOUT_S,
-            json_schema=load_schema_file(),
-            extra_args=builder_args(self.test_command, builder_instructions()),
-        )
+        prompt = build_prompt(self.plan, step, done_titles, self.test_command, self._st(sid)["answers"])
+
+        def req(entry: Entry) -> AgentRequest:
+            return AgentRequest(prompt=prompt, cwd=self.wt, model=entry.model, timeout_s=BUILDER_TIMEOUT_S,
+                                json_schema=load_schema_file(),
+                                extra_args=builder_args(self.test_command, builder_instructions()))  # fmt: skip
+
         result = self._agent(sid, "builder", req)
         if not result.ok:
             return self._agent_stop(sid, "builder", result, None)
@@ -642,29 +664,40 @@ class Executor:
         sid = step.id
         diff_path = sdir / "diff.patch"
         diff_path.write_text(workspace.diff_uncommitted(self.wt), encoding="utf-8")
-        role = self.cfg.roles["reviewer"]
-        args, inline = reviewer_args(role.agent, reviewer_instructions(), sdir.resolve())
-        prompt = review_prompt(self.plan, step, diff_path.resolve(), self.test_command, inline)
         schema = review_mod.load_schema_file()
+        role_text = reviewer_instructions()
 
-        def call(p: str, resume_id: str | None = None) -> AgentResult:
-            req = AgentRequest(prompt=p, cwd=self.wt, model=role.model, timeout_s=REVIEW_TIMEOUT_S, json_schema=schema,
-                               resume_id=resume_id, extra_args=args)  # fmt: skip
+        def full_prompt(entry: Entry) -> str:
+            _, inline = reviewer_args(entry.agent, role_text, sdir.resolve())
+            return review_prompt(self.plan, step, diff_path.resolve(), self.test_command, inline)
+
+        def call(make: Callable[[Entry], tuple[str, str | None]]) -> AgentResult:
+            """make(entry) -> (prompt, resume_id). Args are per entry: a fallback to agy runs in --mode plan."""
+
+            def req(entry: Entry) -> AgentRequest:
+                args, _ = reviewer_args(entry.agent, role_text, sdir.resolve())
+                p, resume_id = make(entry)
+                return AgentRequest(prompt=p, cwd=self.wt, model=entry.model, timeout_s=REVIEW_TIMEOUT_S,
+                                    json_schema=schema, resume_id=resume_id, extra_args=args)  # fmt: skip
+
             return self._agent(sid, "reviewer", req)
 
         self.log(f"[{sid}] reviewing")
-        first = call(prompt)
+        first = call(lambda e: (full_prompt(e), None))
+        first_entry = self.last_entry
         if not first.ok:
             return self._agent_stop(sid, "reviewer", first, "review")
         review, errors = _parse_json(first, review_mod.Review)
         if review is None:
             feedback = "Your review was invalid:\n" + "\n".join(f"- {e}" for e in errors) + "\nReturn the corrected JSON review."
-            second = call(feedback, first.session_id) if first.session_id else None
+            second = (
+                call(lambda e: (feedback, first.session_id if e == first_entry else None)) if first.session_id else None
+            )
             if second is not None and not second.ok and second.error_kind == ErrorKind.RATE_LIMITED:
                 return self._agent_stop(sid, "reviewer", second, "review")
             if second is None or not second.ok:
                 bad = json.dumps(first.structured, indent=2) if first.structured is not None else first.text
-                second = call(f"{prompt}\n\n## Previous review (invalid)\n{bad}\n\n{feedback}")
+                second = call(lambda e: (f"{full_prompt(e)}\n\n## Previous review (invalid)\n{bad}\n\n{feedback}", None))
             if not second.ok:
                 return self._agent_stop(sid, "reviewer", second, "review")
             review, errors = _parse_json(second, review_mod.Review)
@@ -686,7 +719,6 @@ class Executor:
         assert self.plan is not None
         sid = step.id
         st = self._st(sid)
-        role = self.cfg.roles["repair"]
         n = st["rounds_total"] + 1
         ctx = st.get("repair_ctx") or {"reasons": ["tests"], "issues": []}
         rin = sdir / "repair_input" / f"round{n}"  # the ONLY folder the repair agent may read besides the repo
@@ -699,9 +731,17 @@ class Executor:
         args = repair_args(self.test_command, self.retest_command, repair_instructions(), rin.resolve())
         schema = load_schema_file()
 
-        def call(p: str, resume_id: str | None) -> AgentResult:
-            req = AgentRequest(prompt=p, cwd=self.wt, model=role.model, timeout_s=REPAIR_TIMEOUT_S, json_schema=schema,
-                               resume_id=resume_id, extra_args=args)  # fmt: skip
+        session_entry = st.get("session_entry")
+
+        def call(allow_resume: bool) -> AgentResult:
+            """Resume the builder/last repair session only on the entry that created it; any other entry starts fresh."""
+
+            def req(entry: Entry) -> AgentRequest:
+                resume = bool(allow_resume and st.get("session_id") and entry.label == session_entry)
+                return AgentRequest(prompt=(RESUME_HEADER + prompt) if resume else prompt, cwd=self.wt, model=entry.model,
+                                    timeout_s=REPAIR_TIMEOUT_S, json_schema=schema,
+                                    resume_id=st["session_id"] if resume else None, extra_args=args)  # fmt: skip
+
             return self._agent(sid, "repair", req)
 
         before = st["roles_tokens"].get("repair", 0)
@@ -709,13 +749,14 @@ class Executor:
         mode, resume_failed = "fresh", False
         result: AgentResult | None = None
         if st.get("session_id"):
-            result = call(RESUME_HEADER + prompt, st["session_id"])
-            mode = "resumed"
-            if not result.ok and result.error_kind != ErrorKind.RATE_LIMITED:
+            result = call(True)
+            if result.ok or result.error_kind == ErrorKind.RATE_LIMITED:
+                mode = "resumed" if (self.last_entry and self.last_entry.label == session_entry) else "fresh"
+            else:
                 self.log(f"[{sid}] resume failed ({result.error_kind.value}); using a fresh call")
                 result, mode, resume_failed = None, "fresh", True
         if result is None:
-            result = call(prompt, None)
+            result = call(False)
         if not result.ok:
             return self._agent_stop(sid, "repair", result, "need_repair")
         report = _parse_report(result)

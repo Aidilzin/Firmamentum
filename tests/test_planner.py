@@ -5,7 +5,7 @@ import json
 from plan_factory import good_plan, result, step
 
 from orch.adapters.fake import FakeAdapter
-from orch.config import ResolvedRepo, apply_overrides, load_config
+from orch.config import Entry, ResolvedRepo, apply_overrides, load_config
 from orch.planner import extract_json, make_plan, planner_instructions
 
 CFG = load_config()
@@ -119,7 +119,7 @@ def test_scout_failure_stops_before_planner(tmp_path):
 
 
 def test_planner_on_agy_gets_instructions_inline_and_plan_mode(tmp_path):
-    cfg = CFG.model_copy(update={"roles": {**CFG.roles, "planner": CFG.roles["planner"].model_copy(update={"agent": "agy", "model": None})}})
+    cfg = CFG.model_copy(update={"roles": {**CFG.roles, "planner": [Entry(agent="agy", model=None)]}})
     out, fakes = run(tmp_path, {"agy": [result(good_plan(), agent="agy")]}, cfg=cfg)
     req = fakes["agy"].requests[0]
     assert out.plan and req.extra_args == ["--mode", "plan"]
