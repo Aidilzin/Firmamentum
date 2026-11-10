@@ -19,3 +19,4 @@ review: per_step          # per_step | off
 max_repair_rounds: 3
 repos:
   orch: { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
+  practice: { path: "../orch-practice", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }

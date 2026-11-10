@@ -271,7 +271,7 @@ def check_hidden_tests(hidden: Path, repo: Path, worktree: Path | None = None) -
     entries = sorted(hidden.iterdir())
     if any(e.is_dir() for e in entries):
         raise ExecError(f"--hidden-tests {hidden} has subfolders; only flat files are copied")
-    names = [e.name for e in entries if e.is_file() and e.name != "__pycache__"]
+    names = [e.name for e in entries if e.is_file() and not e.name.startswith(".")]  # dotfiles (markers) are skipped
     if not names:
         raise ExecError(f"--hidden-tests {hidden} has no files")
     tracked = set(workspace.git(Path(repo), "ls-tree", "-r", "--name-only", "HEAD", "--", "tests/", check=False).stdout.split())
