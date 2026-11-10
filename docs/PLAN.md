@@ -12,6 +12,45 @@ This matters because both vendors have closed the "use my subscription inside my
 
 **Good news:** your Firmamentum design (Laplace spec, Maxwell build, Descartes repair, rich terminal UI, pytest loop) maps almost directly onto this. Treat this project as Firmamentum v2: keep the personas and the loop, and replace the RunPod Qwen backend with CLI adapters. That removes the GPU pod cost completely.
 
+## Status (updated Nov 10, 2026)
+
+**Phases 0-5 are done** (see `docs/phase0-findings.md` ... `docs/phase5b-notes.md`). Not built by design: web UI, vector DB, auto-merge to main. Not built yet: MCP server (optional item of Phase 5).
+
+| Phase | Result |
+| --- | --- |
+| 0 Spike | both CLIs run headless from Python on Windows, fixtures saved |
+| 1 Adapters | `AgentAdapter`, Claude/Antigravity/Fake adapters, usage log in SQLite |
+| 2 Planner | `orch plan`, schema-validated plan, scout optional |
+| 3 Execution | worktrees, builder, orchestrator-run tests, path guards |
+| 4 Review/repair/approval | reviewer by schema, repair rounds, `approve/reject/answer/merge` |
+| 5a Router | fallback lists per role, cooldowns, reset-time parsing, `resume` pauses |
+| 5b UX | rich live view, `--plain`, practice repo, `--hidden-tests`, README |
+
+### Decisions that changed from this plan
+
+- **agy takes the prompt as `-p=<prompt>`** (one argv item), and **agy does not read stdin**. claude gets the prompt on stdin. Prompts over 8000 chars go through a temp file under `.orch/prompts/`.
+- **Structured output** comes back in a top-level `structured_output` key from both CLIs (`--json-schema` inline, `$defs` accepted). Pydantic still validates; one retry.
+- **No `--max-turns`** in this claude version; the turn cap is a 20 min timeout that kills the process tree. `--max-budget-usd` is not used (meaningless on a subscription).
+- **Roles are ordered lists** (`claude:opus, claude:sonnet, agy:default`), not `{agent, model}` plus `fallback_model`. builder and repair are claude-only because agy has no tool allow-list.
+- **Router**: one fallback hop per call, SQLite `cooldowns` table, reset-time parsing, `orch resume` waits for `resume_after`.
+- **Test command comes from `config.yaml` only** (plus optional `retest_command`); the plan's `test_command` is ignored with a warning.
+- **Worktrees live outside the repo** (`%LOCALAPPDATA%\orch\wt`) so tests in the main checkout cannot collect them; every destructive git call is path-guarded.
+- **Approvals are per file and rule**, not per step; `tests_removed` and `all_agents_rate_limited` were added to the approval list; repairs-exhausted needs `approve --retry`, never a plain approve.
+- **Repair reads a copied input folder** (`repair_input/roundN`), not the step folder; it tries `--resume` of the builder session and falls back to a fresh call.
+- **Reviewer** is read-only claude (`--tools Read,Grep,Glob`) or agy `--mode plan`; blocker/major <=> reject, minor never blocks.
+- Usage log is one global SQLite file because plan quota is shared across projects.
+- `VIRTUAL_ENV` is removed from every child environment (uv warning noise).
+- Gemini model names are not pinned: `agy:default` means no `--model` flag.
+
+### Next ideas
+
+- Capture real rate-limit messages and tighten `RATE_LIMIT_PATTERNS` / reset parsing; add `tzdata` for exact zone names (needs your OK).
+- MCP server so Claude Code or Antigravity can call orch.
+- Parallel independent steps (two worktrees), after the sequential flow has more real mileage.
+- `orch clean --all` for old worktrees and branches; desktop notification on stops.
+- A second target repo (Laravel/React) to exercise non-Python `test_command`s and `tests_removed` for other languages.
+- Use agy as a real reviewer and compare verdicts with claude's.
+
 ## Ground rules for your two subscriptions
 
 The single rule: **call the vendor's own CLI, never reuse its login token in your own code.** Everything else follows from that.
