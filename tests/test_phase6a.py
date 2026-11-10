@@ -480,3 +480,21 @@ def test_status_command_shows_constellation_and_demon_names(env, tmp_path, monke
     assert r.exit_code == 0, r.output
     assert "step 1 of 1" in r.output and "Maxwell" in r.output and "Run tokens:" in r.output and "time" in r.output
     assert "Planning models:" not in r.output or "Laplace=" in r.output
+
+
+def test_constellation_line_has_a_state_word():
+    words = {"done": DONE_META, "running": RUNNING_META, "needs your approval": APPROVAL_META, "paused": PAUSED_META, "failed": FAILED_META}
+    for word, meta in words.items():
+        assert f" · {word} · " in constellation(build_run_view(meta), DARK_T).plain
+
+
+def test_status_table_wraps_long_review_issues(tmp_path):
+    long = "word " * 60
+    d = tmp_path / "r"
+    d.mkdir()
+    meta = {"run_id": "r", "status": "done", "steps": {"s1": S("done", reviews=[{
+        "round": 1, "verdict": "approve", "summary": "", "issues": [{"severity": "minor", "file": "a.py", "line": 3, "problem": long}]}])}}
+    (d / "meta.json").write_text(__import__("json").dumps(meta), encoding="utf-8")
+    table = cli._status_table(d, "demo")
+    issue_lines = [ln for ln in table.splitlines() if ln.startswith(" " * 8) or "[minor]" in ln]
+    assert len(issue_lines) > 1 and all(len(ln) <= 100 for ln in issue_lines) and "[minor] a.py:3" in table

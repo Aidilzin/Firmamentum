@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import textwrap
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -362,7 +363,8 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
             minor = sum(1 for i in rv["issues"] if i["severity"] == "minor")
             lines.append(f"      review (round {rv['round']}): {rv['verdict']}; {len(rv['issues']) - minor} blocking, {minor} minor")
             for i in rv["issues"]:
-                lines.append(f"        [{i['severity']}] {i['file']}:{i.get('line') or '-'} {i['problem']}")
+                lines.append(textwrap.fill(f"[{i['severity']}] {i['file']}:{i.get('line') or '-'} {i['problem']}", width=100,
+                                           initial_indent=" " * 8, subsequent_indent=" " * 12))
         for w in s.get("warnings") or []:
             lines.append(f"      warning: {w}")
         if s.get("question"):

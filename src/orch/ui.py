@@ -56,6 +56,12 @@ def stop_text(info: StopInfo) -> list[str]:
 # ---------- renderers ----------
 
 
+RUN_WORD = {  # every state has a word as well as a glyph
+    "executing": "running", "done": "done", "paused": "paused", "failed": "failed", "rejected": "rejected",
+    "awaiting_approval": "needs your approval", "needs_input": "needs your answer", "planned": "planned",
+}
+
+
 def constellation(view: RunView, theme: Theme) -> Text:
     """`✦───✦───✧───·  step 3 of 4`: done, done, running, pending."""
     t = Text()
@@ -77,6 +83,7 @@ def constellation(view: RunView, theme: Theme) -> Text:
     if view.steps:
         focus = view.steps[view.step_index - 1]
         t.append(f"  step {view.step_index} of {view.step_count}", style=theme.style("text"))
+        t.append(f" · {RUN_WORD.get(view.status, view.status)}", style=theme.style("text", bold=True))
         t.append(f" · {focus.title}", style=theme.style("dim"))
     return t
 
