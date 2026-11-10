@@ -107,6 +107,13 @@ def run_process(
         except Exception:  # pipes held by orphans; give up on the remaining output
             stdout, stderr = b"", b""
         out.returncode = proc.returncode
+    except BaseException:  # Ctrl-C, SystemExit, anything: never leave the child running
+        kill_tree(proc)
+        try:
+            proc.communicate(timeout=5)
+        except Exception:
+            pass
+        raise
     out.stdout = (stdout or b"").decode("utf-8", errors="replace")
     out.stderr = (stderr or b"").decode("utf-8", errors="replace")
     out.elapsed_ms = int((time.perf_counter() - t0) * 1000)

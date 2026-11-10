@@ -57,8 +57,12 @@ def git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProces
     return p
 
 
-def _guard(path: Path, repo: Path | None = None) -> Path:
-    """Return the resolved path, or raise GuardError unless it is a linked worktree under the orch root."""
+def _guard(path: Path, repo: Path | None = None, branch: str | None = None) -> Path:
+    """Return the resolved path, or raise GuardError unless it is a linked worktree under the orch root.
+
+    The `.git` file inside a worktree is writable by the builder, so what it points to is checked too: git's
+    own git-dir must be a `worktrees/<name>` folder of the common dir (not the main repo's `.git`), and when
+    `branch` is given the worktree must have exactly that branch checked out."""
     resolved = Path(path).resolve()
     root = worktree_root().resolve()
     if repo is not None and resolved == Path(repo).resolve():
@@ -67,6 +71,19 @@ def _guard(path: Path, repo: Path | None = None) -> Path:
         raise GuardError(f"{resolved} is not inside the orch worktree root {root}")
     if not (resolved / ".git").is_file():  # a main checkout has a .git directory
         raise GuardError(f"{resolved} is not a linked git worktree")
+    p = git(resolved, "rev-parse", "--absolute-git-dir", "--git-common-dir", check=False)
+    lines = p.stdout.splitlines()
+    if p.returncode != 0 or len(lines) != 2:
+        raise GuardError(f"{resolved}: cannot read its git directory")
+    git_dir = Path(lines[0]).resolve()
+    common = Path(lines[1])
+    common = (resolved / common if not common.is_absolute() else common).resolve()
+    if git_dir.parent != common / "worktrees":
+        raise GuardError(f"{resolved}: its .git file does not point at a linked-worktree folder ({git_dir})")
+    if repo is not None and common != (Path(repo).resolve() / ".git"):
+        raise GuardError(f"{resolved}: belongs to a different repository ({common})")
+    if branch is not None and current_branch(resolved) != branch:
+        raise GuardError(f"{resolved}: expected branch {branch}, found {current_branch(resolved)}")
     return resolved
 
 
@@ -121,9 +138,26 @@ def _identity_args(wt: Path) -> list[str]:
     return args
 
 
-def commit_step(wt: Path, step_id: str, title: str, paths: list[str] | None = None) -> str:
+def head_sha(wt: Path) -> str:
+    return git(wt, "rev-parse", "HEAD").stdout.strip()
+
+
+def check_head(wt: Path, base_sha: str, branch: str) -> str | None:
+    """None when the worktree is still on `branch` at `base_sha`; otherwise a description of what moved.
+    Every check compares against HEAD, so a commit made by the agent would hide its own change."""
+    try:
+        _guard(wt, branch=branch)
+        now = head_sha(wt)
+    except WorkspaceError as e:
+        return str(e)
+    if now != base_sha:
+        return f"HEAD moved from {base_sha[:8]} to {now[:8]} during the step (the agent committed or reset)"
+    return None
+
+
+def commit_step(wt: Path, step_id: str, title: str, paths: list[str] | None = None, branch: str | None = None) -> str:
     """Commit as `orch(<id>): <title>`. `paths` limits staging (so test artifacts are not committed)."""
-    wt = _guard(wt)
+    wt = _guard(wt, branch=branch)
     if paths is None:
         git(wt, "add", "-A")
     elif paths:
@@ -142,9 +176,9 @@ def diff_uncommitted(wt: Path) -> str:
     return git(wt, "diff", "HEAD").stdout
 
 
-def reset_to_head(wt: Path) -> None:
+def reset_to_head(wt: Path, branch: str | None = None) -> None:
     """Throw away uncommitted work in the worktree (guarded)."""
-    wt = _guard(wt)
+    wt = _guard(wt, branch=branch)
     git(wt, "reset", "--hard", "HEAD")
     git(wt, "clean", "-fd")
 

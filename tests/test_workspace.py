@@ -113,3 +113,33 @@ def test_guard_refuses_a_worktree_of_another_location(repo, tmp_path):
     git(repo, "worktree", "add", "-q", "-b", "other", str(other))
     with pytest.raises(GuardError):
         workspace.reset_to_head(other)
+
+
+def test_guard_refuses_a_git_file_redirected_to_the_main_repo(repo):
+    wt = workspace.create(repo, "proj", "run1")
+    (wt.path / ".git").unlink()
+    (wt.path / ".git").write_text(f"gitdir: {(repo / '.git').as_posix()}\n", encoding="utf-8")
+    (wt.path / "x.py").write_text("x = 1\n", encoding="utf-8")
+    head = git(repo, "rev-parse", "HEAD").strip()
+    with pytest.raises(GuardError):
+        workspace.commit_step(wt.path, "s1", "nope")
+    with pytest.raises(GuardError):
+        workspace.reset_to_head(wt.path)
+    assert git(repo, "rev-parse", "HEAD").strip() == head  # nothing landed on the main checkout
+
+
+def test_guard_refuses_the_wrong_branch(repo):
+    wt = workspace.create(repo, "proj", "run1")
+    git(wt.path, "checkout", "-q", "-b", "sneaky")
+    with pytest.raises(GuardError):
+        workspace.reset_to_head(wt.path, "orch/run1")
+    assert workspace.check_head(wt.path, wt.base_sha, "orch/run1")
+
+
+def test_check_head_sees_an_agent_commit(repo):
+    wt = workspace.create(repo, "proj", "run1")
+    assert workspace.check_head(wt.path, wt.base_sha, "orch/run1") is None
+    (wt.path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    git(wt.path, "add", "-A")
+    git(wt.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "sneaky")
+    assert "HEAD moved" in workspace.check_head(wt.path, wt.base_sha, "orch/run1")

@@ -94,8 +94,7 @@ def test_reviewer_and_repair_permissions_are_exact(tmp_path):
 
     r = repair_args("uv run pytest -q", "uv run pytest -q --lf", "ROLE", tmp_path / "round1")
     allowed = r[r.index("--allowedTools") + 1].split(",")
-    assert allowed[5:] == ["Bash(uv run pytest -q)", "Bash(uv run pytest -q *)", "Bash(uv run pytest -q --lf)",
-                           "Bash(uv run pytest -q --lf *)"]  # fmt: skip
+    assert allowed[5:] == ["Bash(uv run pytest -q)", "Bash(uv run pytest -q --lf)"]
     assert r[r.index("--tools") + 1] == "Read,Grep,Glob,Edit,Write,Bash"
     assert "Bash(git *)" in r[r.index("--disallowedTools") + 1]
     assert r[r.index("--add-dir") + 1] == str(tmp_path / "round1") and r.count("--add-dir") == 1

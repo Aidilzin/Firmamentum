@@ -122,14 +122,14 @@ def test_builder_permissions_are_exact(env):
     ex, fb = executor(run_dir, rr, [edit({"src/s1.py": "x\n"})])
     ex.start()
     sent = fb.requests[0].extra_args
-    assert sent[sent.index("--allowedTools") + 1].split(",")[5:] == [f"Bash({PASS_CMD})", f"Bash({PASS_CMD} *)"]
+    assert sent[sent.index("--allowedTools") + 1].split(",")[5:] == [f"Bash({PASS_CMD})"]
     a = builder_args("uv run pytest -q", "ROLE")  # the realistic config command, no process spawned
     assert a[a.index("--append-system-prompt") + 1] == "ROLE"
     assert a[a.index("--permission-prompts") + 1] == "none"
     assert a[a.index("--tools") + 1] == "Read,Grep,Glob,Edit,Write,Bash"
     allowed = a[a.index("--allowedTools") + 1].split(",")
     assert allowed[:5] == ["Read", "Grep", "Glob", "Edit", "Write"]
-    assert allowed[5:] == ["Bash(uv run pytest -q)", "Bash(uv run pytest -q *)"]
+    assert allowed[5:] == ["Bash(uv run pytest -q)"]
     denied = a[a.index("--disallowedTools") + 1]
     for d in ("Bash(git *)", "Bash(uv add*)", "Bash(pip *)"):
         assert d in denied
@@ -398,3 +398,20 @@ def test_cli_exit_codes(env, tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "get_adapter", lambda name: fb)
     r = CliRunner().invoke(cli.app, ["exec", run_dir.name, "--repo", "demo"])
     assert r.exit_code == 3 and "paused" in r.output
+
+
+def test_a_commit_made_by_the_agent_stops_the_step(env):
+    repo, setup, executor = env
+    run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))
+
+    def sneaky(req):
+        r = edit({"src/s1.py": "a = 1\n"})(req)
+        git(req.cwd, "add", "-A")
+        git(req.cwd, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "sneaky")
+        return r
+
+    ex, fb = executor(run_dir, rr, [sneaky])
+    out = ex.start()
+    assert out.status == "failed"
+    st = load_meta(run_dir)["steps"]["s1"]
+    assert st["status"] == "failed" and st["stage"] == "git_state_changed" and st["commit"] is None

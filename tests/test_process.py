@@ -1,8 +1,11 @@
 """run_process with python -c stand-ins, never a real agent."""
 
 import os
+import subprocess
 import sys
 import time
+
+import pytest
 
 from orch.adapters.process import run_process
 
@@ -67,3 +70,27 @@ def test_timeout_kills_grandchild(tmp_path):
 def test_not_found(tmp_path):
     o = run_process(["definitely-not-a-real-exe-xyz"], cwd=tmp_path, timeout_s=5)
     assert o.not_found
+
+
+def test_interrupt_kills_the_child(tmp_path, monkeypatch):
+    marker = tmp_path / "alive.txt"
+    child = (
+        "import time, pathlib\n"
+        "for _ in range(150):\n"
+        f"    pathlib.Path({str(marker)!r}).write_text('x')\n"
+        "    time.sleep(0.2)\n"
+    )
+    real = subprocess.Popen.communicate
+
+    def boom(self, *a, **k):
+        time.sleep(1.0)  # let the child start writing
+        monkeypatch.setattr(subprocess.Popen, "communicate", real)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", boom)
+    with pytest.raises(KeyboardInterrupt):
+        run_process([sys.executable, "-c", child], cwd=tmp_path, timeout_s=60)
+    time.sleep(0.5)
+    marker.unlink(missing_ok=True)
+    time.sleep(1.0)
+    assert not marker.exists()

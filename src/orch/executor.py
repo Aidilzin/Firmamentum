@@ -94,7 +94,7 @@ def builder_args(test_command: str, role_text: str, extra_commands: tuple[str, .
     """Exact tool permissions for the Builder. Commands MUST come from config.yaml, never from the plan."""
     allowed = ["Read", "Grep", "Glob", "Edit", "Write"]
     for c in dict.fromkeys([test_command, *extra_commands]):
-        allowed += [f"Bash({c})", f"Bash({c} *)"]
+        allowed.append(f"Bash({c})")  # exact match only: a trailing `*` lets pytest flags (--basetemp, -p) through
     return [
         "--permission-prompts", "none",
         "--tools", BUILDER_TOOLS,
@@ -268,7 +268,7 @@ def new_step_state(title: str) -> dict:
         "warnings": [], "question": None, "error": None, "stage": None, "rule": None, "phase": None,
         "resume_phase": None, "roles_tokens": {}, "rounds_used": 0, "rounds_total": 0, "rounds": [],
         "reviews": [], "approved": [], "answers": [], "repair_ctx": None, "last_failure": None,
-        "risk_approved": False,
+        "risk_approved": False, "base_sha": None,
     }  # fmt: skip
 
 
@@ -595,7 +595,8 @@ class Executor:
         sid = step.id
         (self.run_dir / "steps" / sid).mkdir(parents=True, exist_ok=True)
         if phase is None:
-            workspace.reset_to_head(self.wt)  # a crashed or paused step may have left partial edits
+            workspace.reset_to_head(self.wt, self._branch)  # a crashed or paused step may have left partial edits
+            self._set_step(sid, base_sha=workspace.head_sha(self.wt))
             self._set_step(sid, status="running", error=None, question=None, warnings=[], phase="build", stage=None,
                            rule=None, resume_phase=None)  # fmt: skip
             self.log(f"[{sid}] {step.title}: running builder")
@@ -607,6 +608,8 @@ class Executor:
         else:
             self._set_step(sid, status="running", error=None, question=None, resume_phase=None, stage=None, rule=None)
             self.log(f"[{sid}] {step.title}: continuing at {phase}")
+            if not self._st(sid).get("base_sha"):
+                self._set_step(sid, base_sha=workspace.head_sha(self.wt))
         return self._pipeline(step, phase)
 
     def _build(self, step: Step) -> ExecOutcome | None:
@@ -700,8 +703,23 @@ class Executor:
             else:
                 raise ExecError(f"unknown phase {phase!r}")
 
+    @property
+    def _branch(self) -> str:
+        return workspace.branch_name(self.run_dir.name)
+
+    def _check_git_state(self, sid: str) -> ExecOutcome | None:
+        """Stop when the worktree's HEAD or branch moved since the step began (H3/H4)."""
+        base = self._st(sid).get("base_sha")
+        problem = workspace.check_head(self.wt, base, self._branch) if base else None
+        if problem is None:
+            return None
+        self._set_step(sid, status="failed", error=problem, stage="git_state_changed", resume_phase=None)
+        return self._stop("failed", sid, f"git_state_changed: {problem}")
+
     def _post_checks(self, step: Step) -> ExecOutcome | None:
         sid = step.id
+        if (stop := self._check_git_state(sid)) is not None:
+            return stop
         changed = workspace.changed_files(self.wt)  # the truth, not report.files_changed
         extra = outside_plan(changed, step.files + (self._st(sid).get("hidden_files") or []))
         if extra:
@@ -919,10 +937,12 @@ class Executor:
                        summary=summary, resume_phase=None)  # fmt: skip
         return self._stop("awaiting_approval", sid, summary)
 
-    def _commit(self, step: Step, sdir: Path) -> None:
+    def _commit(self, step: Step, sdir: Path) -> ExecOutcome | None:
         sid = step.id
         st = self._st(sid)
-        sha = workspace.commit_step(self.wt, sid, step.title, st.get("changed_files") or [])
+        if (stop := self._check_git_state(sid)) is not None:
+            return stop
+        sha = workspace.commit_step(self.wt, sid, step.title, st.get("changed_files") or [], self._branch)
         (sdir / "diff.patch").write_text(workspace.diff(self.wt, f"{sha}^", sha), encoding="utf-8")
         self._set_step(sid, status="done", commit=sha, phase=None, resume_phase=None, repair_ctx=None)
         self.log(f"[{sid}] done {sha[:8]}")
