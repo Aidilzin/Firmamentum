@@ -98,6 +98,14 @@ def _writable(directory: Path) -> str | None:
 # ---------- individual checks ----------
 
 
+def short_path(path: str, limit: int = 44) -> str:
+    """Keep doctor rows on one line: a long path is cut to its last two parts."""
+    if len(path) <= limit:
+        return path
+    parts = Path(path).parts
+    return "…\\" + "\\".join(parts[-2:]) if len(parts) > 2 else path
+
+
 def check_python(ctx: Context) -> Check:
     v = ".".join(map(str, ctx.python))
     if ctx.python >= (3, 12):
@@ -109,7 +117,7 @@ def check_tool(ctx: Context, name: str, level_missing: str, fix: str) -> Check:
     path = ctx.which(name)
     if not path:
         return Check(name, level_missing, "not found on PATH", fix)
-    return Check(name, OK, path)
+    return Check(name, OK, short_path(path))
 
 
 def check_cli(ctx: Context, name: str, level_missing: str, fix: str) -> Check:
@@ -119,7 +127,7 @@ def check_cli(ctx: Context, name: str, level_missing: str, fix: str) -> Check:
     ver = ctx.version(name)
     if ver == "not found" or ver.startswith("error"):
         return Check(name, ERR, f"{path}: {ver}", f"reinstall {name} or fix its install; `{name} --version` must work")
-    return Check(name, OK, f"{ver} ({path})")
+    return Check(name, OK, f"{ver} ({short_path(path)})")
 
 
 def check_process_env(ctx: Context) -> list[Check]:

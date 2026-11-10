@@ -202,7 +202,7 @@ def _demon_lines(meta: dict, steps: list[StepView], models: dict[str, str], by_r
             if role not in models and not tokens:
                 continue
             if role == "planner":
-                text = f"planned {n_steps} steps" if n_steps else ("needs your answer" if meta.get("status") == "needs_input" else "planned")
+                text = f"planned {n_steps} step{'' if n_steps == 1 else 's'}" if n_steps else ("needs your answer" if meta.get("status") == "needs_input" else "planned")
             else:
                 text = VERBS[role][1]
             model, elapsed = models.get(role), None
