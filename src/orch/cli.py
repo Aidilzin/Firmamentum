@@ -17,7 +17,8 @@ from . import budget
 from .budget import run_agent, summary, summary_by_model
 from .config import ConfigError, apply_overrides, load_config, resolve_repo
 from . import versions, workspace
-from .executor import ExecError, ExecOutcome, Executor
+from .executor import ExecError, ExecOutcome, Executor, check_hidden_tests
+from .ui import make_view
 from .merge import MergeError, merge_run
 from .plan import format_plan
 from .planner import make_plan
@@ -347,18 +348,32 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def _drive(target, run_dir: Path, cfg, action: str = "start", **kw) -> None:
-    ex = Executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=typer.echo)
+PLAIN_OPT = typer.Option(False, "--plain", help="Line-by-line output, no live table (automatic when not a terminal).")
+HIDDEN_OPT = typer.Option(
+    None, "--hidden-tests",
+    help="PRACTICE USE ONLY. Directory of test files copied into the worktree's tests/ after the builder "
+         "finishes a step and before the checks, so the builder never sees them (forces a real repair round). "
+         "Must be outside the repo and any worktree; refused if a file name already exists in tests/.",
+)  # fmt: skip
+
+
+def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None, **kw) -> None:
+    view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()})
+    ex = Executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
+                  on_update=view.on_update, hidden_tests=hidden_tests)  # fmt: skip
     try:
-        outcome: ExecOutcome = getattr(ex, action)(**kw)
+        with view:
+            outcome: ExecOutcome = getattr(ex, action)(**kw)
     except (ExecError, workspace.WorkspaceError, RunNotFound) as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
     typer.echo("")
     typer.echo(_status_table(run_dir, target.name))
     typer.echo(f"\nResult: {outcome.status}" + (f" ({outcome.step_id}): {outcome.message}" if outcome.message else ""))
-    for n in next_commands(run_dir, target.name):
+    nxt = next_commands(run_dir, target.name)
+    for n in nxt:
         typer.echo(f"Next: {n}")
+    view.show_stop(outcome.status, outcome.step_id, outcome.message, load_meta(run_dir), nxt)
     raise typer.Exit(EXIT_CODES.get(outcome.status, 1))
 
 
@@ -367,11 +382,13 @@ def exec_cmd(
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
+    plain: bool = PLAIN_OPT,
+    hidden_tests: Optional[Path] = HIDDEN_OPT,
 ) -> None:
     """Execute a stored plan in a new git worktree (no merge)."""
     cfg = _load_cfg(model)
     target = _repo_or_exit(cfg, repo)
-    _drive(target, _find_or_exit(target, run_id), cfg, "start")
+    _drive(target, _find_or_exit(target, run_id), cfg, "start", plain=plain, hidden_tests=hidden_tests)
 
 
 @app.command()
@@ -380,6 +397,7 @@ def resume(
     force: bool = typer.Option(False, "--force", help="Resume even if resume_after is still in the future."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
+    plain: bool = PLAIN_OPT,
 ) -> None:
     """Continue a started run from its first unfinished step."""
     cfg = _load_cfg(model)
@@ -390,7 +408,7 @@ def resume(
     if after is not None and after > datetime.now(timezone.utc) and not force:
         typer.echo(f"Run is paused until {_local(after)} (usage limit). Use --force to try earlier.", err=True)
         raise typer.Exit(3)
-    _drive(target, run_dir, cfg, "resume")
+    _drive(target, run_dir, cfg, "resume", plain=plain)
 
 
 @app.command()
@@ -399,6 +417,8 @@ def run(
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     scout: bool = typer.Option(False, "--scout", help="Run the scout role first (costs extra quota)."),
     model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
+    plain: bool = PLAIN_OPT,
+    hidden_tests: Optional[Path] = HIDDEN_OPT,
 ) -> None:
     """Plan, then execute, in one go."""
     cfg = _load_cfg(model)
@@ -406,6 +426,12 @@ def run(
     if not target.test_command:
         typer.echo("Error: this repo has no test_command in config.yaml; refusing to run.", err=True)
         raise typer.Exit(2)
+    if hidden_tests is not None:  # refuse before any quota is spent
+        try:
+            check_hidden_tests(hidden_tests, target.path)
+        except ExecError as e:
+            typer.echo(f"Error: {e}", err=True)
+            raise typer.Exit(2)
     run_dir = create_run(target.path, request)
     outcome = make_plan(request, target, cfg, lambda name: get_adapter(AgentName(name)), use_scout=scout)
     roles = (["scout"] if scout else []) + ["planner"]
@@ -419,7 +445,7 @@ def run(
         for n in next_commands(run_dir, target.name):
             typer.echo(f"Next: {n}")
         raise typer.Exit(2)
-    _drive(target, run_dir, cfg, "start")
+    _drive(target, run_dir, cfg, "start", plain=plain, hidden_tests=hidden_tests)
 
 
 @app.command()
@@ -429,11 +455,12 @@ def approve(
     retry: bool = typer.Option(False, "--retry", help="After repair rounds ran out: grant another set of rounds."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
+    plain: bool = PLAIN_OPT,
 ) -> None:
     """Approve a step that is awaiting approval, then continue the run."""
     cfg = _load_cfg(model)
     target = _repo_or_exit(cfg, repo)
-    _drive(target, _find_or_exit(target, run_id), cfg, "approve", step_id=step, retry=retry)
+    _drive(target, _find_or_exit(target, run_id), cfg, "approve", plain=plain, step_id=step, retry=retry)
 
 
 @app.command()
@@ -488,6 +515,7 @@ def answer(
     step: Optional[str] = typer.Option(None, "--step", help="Step id (optional if only one step waits)."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
+    plain: bool = PLAIN_OPT,
 ) -> None:
     """Answer a question: re-plan (plan needs input) or re-run the step (step needs input)."""
     cfg = _load_cfg(model)
@@ -497,7 +525,7 @@ def answer(
     if not meta.get("steps") and step is None and meta.get("status") == "needs_input":
         _answer_plan(target, cfg, run_dir, text)
         return
-    _drive(target, run_dir, cfg, "answer", step_id=step, text=text)
+    _drive(target, run_dir, cfg, "answer", plain=plain, step_id=step, text=text)
 
 
 @app.command()

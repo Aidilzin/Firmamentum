@@ -66,6 +66,7 @@ source = { editable = "." }
 dependencies = [
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "typer" },
 ]
 
@@ -78,6 +79,7 @@ dev = [
 requires-dist = [
     { name = "pydantic", specifier = ">=2.14.3" },
     { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "rich", specifier = ">=15.0.0" },
     { name = "typer", specifier = ">=0.28.0" },
 ]
 

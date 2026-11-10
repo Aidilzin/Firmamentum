@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import shutil
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -249,6 +250,39 @@ def new_step_state(title: str) -> dict:
     }  # fmt: skip
 
 
+def _inside(path: Path, parent: Path) -> bool:
+    p, q = path.resolve(), parent.resolve()
+    return p == q or q in p.parents
+
+
+def check_hidden_tests(hidden: Path, repo: Path, worktree: Path | None = None) -> list[str]:
+    """Validate --hidden-tests DIR and return the file names to copy. Raises ExecError (nothing is spent yet).
+
+    Refused: not a directory, empty, subfolders, DIR inside the target repo or inside any orch worktree (the
+    builder could read it), or a name that already exists in the repo's tests/ (at HEAD) or in the worktree's tests/."""
+    hidden = Path(hidden)
+    if not hidden.is_dir():
+        raise ExecError(f"--hidden-tests {hidden} is not a directory")
+    if _inside(hidden, repo):
+        raise ExecError(f"--hidden-tests {hidden} is inside the target repo {repo}; keep it outside so the builder cannot see it")
+    roots = [workspace.worktree_root()] + ([worktree] if worktree else [])
+    if any(_inside(hidden, r) for r in roots):
+        raise ExecError(f"--hidden-tests {hidden} is inside an orch worktree; keep it outside")
+    entries = sorted(hidden.iterdir())
+    if any(e.is_dir() for e in entries):
+        raise ExecError(f"--hidden-tests {hidden} has subfolders; only flat files are copied")
+    names = [e.name for e in entries if e.is_file() and e.name != "__pycache__"]
+    if not names:
+        raise ExecError(f"--hidden-tests {hidden} has no files")
+    tracked = set(workspace.git(Path(repo), "ls-tree", "-r", "--name-only", "HEAD", "--", "tests/", check=False).stdout.split())
+    clash = [n for n in names if f"tests/{n}" in tracked or (Path(repo) / "tests" / n).exists()]
+    if worktree is not None:
+        clash += [n for n in names if (worktree / "tests" / n).exists() and n not in clash]
+    if clash:
+        raise ExecError("--hidden-tests: tests/ already has file(s) named " + ", ".join(clash))
+    return names
+
+
 # ---------- executor ----------
 
 
@@ -260,8 +294,12 @@ class Executor:
         cfg: Config,
         get_adapter: AdapterFactory,
         log: Callable[[str], None] = lambda m: None,
+        on_update: Callable[[dict], None] | None = None,
+        hidden_tests: Path | None = None,
     ):
         self.repo, self.run_dir, self.cfg, self.get_adapter, self.log = repo, run_dir, cfg, get_adapter, log
+        self.on_update = on_update  # display only: called with the meta dict after every save
+        self.hidden_tests = Path(hidden_tests).resolve() if hidden_tests else None
         self.meta: dict = {}
         self.plan: Plan | None = None
         self.test_command = ""
@@ -273,6 +311,8 @@ class Executor:
     # -- meta --
     def _save(self) -> None:
         write_meta(self.run_dir, self.meta)
+        if self.on_update is not None:
+            self.on_update(self.meta)
 
     def _set_step(self, sid: str, **kw) -> dict:
         s = self.meta["steps"][sid]
@@ -318,6 +358,8 @@ class Executor:
         if self.meta.get("status") == "rejected":
             raise ExecError("this run was rejected; start a new run")
         self.wt = Path(ex["worktree"])
+        if self.hidden_tests is None and ex.get("hidden_tests"):
+            self.hidden_tests = Path(ex["hidden_tests"]["dir"])
         if need_worktree and not self.wt.is_dir():
             raise ExecError(f"the worktree {self.wt} is gone (orch clean?); it cannot be continued")
 
@@ -335,6 +377,8 @@ class Executor:
             )
             warnings.append(w)
             self.log("warning: " + w)
+        if self.hidden_tests is not None:  # refuse before a worktree exists
+            check_hidden_tests(self.hidden_tests, self.repo.path)
         wt = workspace.create(self.repo.path, self.repo.name or self.repo.path.name, run_id)
         self.wt = wt.path
         self.meta["exec"] = {
@@ -346,6 +390,8 @@ class Executor:
             "retest_command": self.retest_command,
             "warnings": warnings,
         }
+        if self.hidden_tests is not None:
+            self.meta["exec"]["hidden_tests"] = {"dir": str(self.hidden_tests), "step": None, "files": []}
         self.meta["steps"] = {s.id: new_step_state(s.title) for s in self.plan.topo_order()}
         self.meta["status"] = "executing"
         self._save()
@@ -510,6 +556,8 @@ class Executor:
             self.log(f"[{sid}] {step.title}: running builder")
             if (stop := self._build(step)) is not None:
                 return stop
+            if (stop := self._copy_hidden(step)) is not None:
+                return stop
             phase = "checks"
         else:
             self._set_step(sid, status="running", error=None, question=None, resume_phase=None, stage=None, rule=None)
@@ -537,6 +585,29 @@ class Executor:
         elif report.blocked:
             self._set_step(sid, status="needs_input", question=report.question, stage="builder")
             return self._stop("needs_input", sid, f"builder is blocked: {report.question}")
+        return None
+
+    def _copy_hidden(self, step: Step) -> ExecOutcome | None:
+        """--hidden-tests: after the first built step, before any check, copy DIR's files into <worktree>/tests/.
+        The builder never saw them. They count as planned files and are committed with the step."""
+        ex = self.meta.get("exec") or {}
+        rec = ex.get("hidden_tests")
+        if self.hidden_tests is None or not rec or rec.get("step"):
+            return None
+        sid = step.id
+        try:
+            names = check_hidden_tests(self.hidden_tests, self.repo.path, self.wt)
+        except ExecError as e:
+            self._set_step(sid, status="failed", error=str(e), stage="hidden_tests", resume_phase=None)
+            return self._stop("failed", sid, str(e))
+        dest = self.wt / "tests"
+        dest.mkdir(parents=True, exist_ok=True)
+        for n in names:
+            shutil.copyfile(self.hidden_tests / n, dest / n)
+        files = [f"tests/{n}" for n in names]
+        rec.update(step=sid, files=files)
+        self._set_step(sid, hidden_files=files)
+        self.log(f"[{sid}] hidden tests copied: " + ", ".join(files))
         return None
 
     def _pipeline(self, step: Step, phase: str) -> ExecOutcome | None:
@@ -587,7 +658,7 @@ class Executor:
     def _post_checks(self, step: Step) -> ExecOutcome | None:
         sid = step.id
         changed = workspace.changed_files(self.wt)  # the truth, not report.files_changed
-        extra = outside_plan(changed, step.files)
+        extra = outside_plan(changed, step.files + (self._st(sid).get("hidden_files") or []))
         if extra:
             self._warn(sid, "files outside the step's plan: " + ", ".join(extra))
         self._set_step(sid, changed_files=changed)
