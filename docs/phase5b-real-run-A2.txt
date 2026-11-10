@@ -1,0 +1,38 @@
+Run: 20261110T155659Z-make-slugify-in-src-practice-text-py-str
+Goal: Make slugify in src/practice/text.py strip accents (diacritics) so that e.g. 'Café' becomes 'cafe', while keeping existing behaviour (lowercase, spaces to hyphens).
+Test command: uv run pytest -q
+Assumptions:
+  - Use the standard library unicodedata module (NFKD normalize, then drop combining characters); no new dependency.
+  - Only accents/diacritics are stripped; other non-ASCII characters without a decomposition (e.g. 'ß', CJK) are left as-is, and no other punctuation handling is added.
+  - Existing behaviour (lowercase, replace spaces with '-') must stay unchanged so current tests keep passing.
+
+1. [s1] Strip accents in slugify and add tests
+   In src/practice/text.py, update slugify(text: str) -> str so it removes diacritics before lowercasing and replacing spaces with '-'. Import unicodedata (stdlib), normalize the input with unicodedata.normalize('NFKD', text), and drop characters for which unicodedata.combining(ch) is truthy. Then apply the existing .lower().replace(' ', '-'). Update the docstring to mention accent stripping. In tests/test_text.py add tests: slugify('Café') == 'cafe'; slugify('Crème Brûlée') == 'creme-brulee'; and an uppercase accented case such as slugify('ÉCOLE') == 'ecole'. Keep the existing three tests unchanged.
+   depends on: none
+   files: src/practice/text.py, tests/test_text.py
+   acceptance: New accent tests in tests/test_text.py pass, and the existing test_slugify_basic, test_slugify_single_word and test_slugify_many_words still pass under `uv run pytest -q`.
+   risk flags: none
+[s1] Strip accents in slugify and add tests: running builder
+[s1] hidden tests copied: tests/test_slug_extra.py
+[s1] repair round 1/3: tests
+[s1] reviewing
+[s1] review: approve (0 blocking, 1 minor)
+[s1] done 874f6920
+
+Run: 20261110T155659Z-make-slugify-in-src-practice-text-py-str  status: done
+Planning models: planner=claude:opus
+Branch: orch/20261110T155659Z-make-slugify-in-src-practice-text-py-str  Worktree: C:\Users\aidil\AppData\Local\orch\wt\practice\20261110T155659Z-make-slugify-in-src-practice-text-py-str
+step  status                tokens  tests       rounds  review   commit    title
+s1    done                  202072  pass        1       approve  874f6920  Strip accents in slugify and add tests
+      tokens by role: builder=74019, repair=71413, reviewer=56640
+      models used: builder=claude:sonnet, repair=claude:sonnet, reviewer=claude:opus
+      round 1: tests; resumed; review=approve
+      review (round 1): approve; 0 blocking, 1 minor
+        [minor] src/practice/text.py:21 The step said to keep the existing `.lower().replace(' ', '-')`. The code instead collapses runs of whitespace, '_' and '-' into one '-' and trims dashes from both ends. This does change behaviour: 'a  b' used to give 'a--b' and now gives 'a-b', and underscores now become '-'. The orchestrator's tests in tests/test_slug_extra.py need exactly this, and no other code calls slugify, so nothing breaks. The docstring still mentions only accent stripping.
+Run tokens: 246,833 total (planner=44,761, builder=74,019, repair=71,413, reviewer=56,640)
+Needs from you:
+  orch diff 20261110T155659Z-make-slugify-in-src-practice-text-py-str --repo practice   # review, then: orch merge 20261110T155659Z-make-slugify-in-src-practice-text-py-str --repo practice
+
+Result: done (None): all steps done
+Next: orch diff 20261110T155659Z-make-slugify-in-src-practice-text-py-str --repo practice   # review, then: orch merge 20261110T155659Z-make-slugify-in-src-practice-text-py-str --repo practice
+exit 0

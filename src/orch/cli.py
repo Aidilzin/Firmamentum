@@ -365,6 +365,13 @@ HIDDEN_OPT = typer.Option(
 )  # fmt: skip
 
 
+def _result_text(outcome) -> str:
+    """`done` alone when the whole run finished; otherwise status, the step (if any) and the message."""
+    if outcome.status == "done" and not outcome.step_id:
+        return "done"
+    return outcome.status + (f" ({outcome.step_id})" if outcome.step_id else "") + (f": {outcome.message}" if outcome.message else "")
+
+
 def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None, **kw) -> None:
     view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()})
     ex = Executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
@@ -377,7 +384,7 @@ def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = Fals
         raise typer.Exit(2)
     typer.echo("")
     typer.echo(_status_table(run_dir, target.name))
-    typer.echo(f"\nResult: {outcome.status}" + (f" ({outcome.step_id}): {outcome.message}" if outcome.message else ""))
+    typer.echo(f"\nResult: {_result_text(outcome)}")
     nxt = next_commands(run_dir, target.name)
     for n in nxt:
         typer.echo(f"Next: {n}")

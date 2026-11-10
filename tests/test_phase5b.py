@@ -389,3 +389,14 @@ def test_diff_hint_absent_when_worktree_is_gone(env, tmp_path, monkeypatch):
     run_dir, _ = _stopped_run(env, tmp_path, monkeypatch)
     CliRunner().invoke(cli.app, ["clean", run_dir.name, "--repo", "demo"])
     assert not any(n.startswith(f"orch diff") for n in cli.next_commands(run_dir, "demo"))
+
+
+def test_result_line_for_a_finished_run_is_just_done(env, tmp_path, monkeypatch):
+    repo, setup, executor = env
+    _cfg(tmp_path, monkeypatch, repo)
+    run_dir, _ = setup(plan=good_plan(steps=[step("s1")]))
+    monkeypatch.setattr(cli, "get_adapter", lambda name: FakeBuilder([edit({"src/s1.py": "a\n"})]))
+    r = CliRunner().invoke(cli.app, ["exec", run_dir.name, "--repo", "demo"])
+    lines = r.output.splitlines()
+    assert "Result: done" in lines and "(None)" not in r.output
+    assert cli._result_text(type("O", (), {"status": "failed", "step_id": "s2", "message": "boom"})()) == "failed (s2): boom"
