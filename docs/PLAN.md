@@ -44,7 +44,7 @@ This matters because both vendors have closed the "use my subscription inside my
 
 ### Next ideas
 
-- Capture real rate-limit messages and tighten `RATE_LIMIT_PATTERNS` / reset parsing; add `tzdata` for exact zone names (needs your OK).
+- Capture real rate-limit messages and tighten `RATE_LIMIT_PATTERNS` / reset parsing (`tzdata` is now a dependency, so zone names are exact).
 - MCP server so Claude Code or Antigravity can call orch.
 - Parallel independent steps (two worktrees), after the sequential flow has more real mileage.
 - `orch clean --all` for old worktrees and branches; desktop notification on stops.

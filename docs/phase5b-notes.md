@@ -1,6 +1,6 @@
 # Phase 5b notes: practice repo, live view, docs
 
-Everything was built and tested with fakes first (255 tests pass, 5 skipped for `tzdata`). Real calls: check A (twice), planner for check B (run by you), then B's builder and reviewer (run by you).
+Everything was built and tested with fakes first (all tests pass; `tzdata` was added at the end so the 5 timezone tests run too). Real calls: check A (twice), planner for check B (run by you), then B's builder and reviewer (run by you).
 
 ## Design
 
@@ -67,7 +67,7 @@ Request: "Remove the deprecated old_slug function and its tests". Run `20261110T
 - agy as a reviewer or fallback in a real run; the scout with real agy.
 - A repair round after a fallback to a different entry (fresh call path) with real CLIs; `resume_failed` fallback with real CLIs.
 - `--hidden-tests` with a multi-step plan against real CLIs (copy once per run is tested with fakes only).
-- The live rich view was only tested with a captured console and `--plain`; the real terminal look (resizing, long titles, many steps) was not exercised by me. Your runs used it or plain mode; I have no report either way.
+- Live view: **tested for real** by you in Windows Terminal during check B. Table, footer and stop panel rendered correctly; long `Next:` commands wrap inside the panel but stay readable. Not tried: very narrow windows, many steps.
 - The reviewer is not told which files are hidden when the hidden-test step is not the step under review (later steps); not an issue for one-step plans.
-- Windows only; `tzdata` is still not a dependency.
+- Windows only. `tzdata` is now a dependency (added with your OK), so named zones in `Resets 4:59am (Asia/Singapore)` resolve exactly; the previously skipped zone tests run.
 - Not pushed.
