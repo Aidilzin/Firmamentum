@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.console import Console
+from rich.text import Text
 
 from .adapters import AgentAdapter, AgentRequest, AntigravityAdapter, ClaudeCodeAdapter
 from . import budget
@@ -18,13 +21,17 @@ from .budget import run_agent, summary, summary_by_model
 from .config import ConfigError, apply_overrides, load_config, resolve_repo
 from . import versions, workspace
 from .executor import ExecError, ExecOutcome, Executor, check_hidden_tests
-from .ui import make_view
+from .theme import current_theme, demon_label, demon_name, resolve_theme, set_theme
+from .ui import make_view, render_doctor, render_plain, render_rich
+from . import doctor as doctor_mod
+from . import home as home_mod
+from .view import build_run_view, duration, fmt_elapsed
 from .merge import MergeError, merge_run
 from .plan import format_plan
 from .planner import make_plan
 from .runs import RunNotFound, create_run, find_run, list_runs, load_meta, load_plan, run_tokens, save_outcome, write_meta
 
-app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.", no_args_is_help=True)
+app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.")
 
 
 class AgentName(str, Enum):
@@ -37,9 +44,27 @@ def get_adapter(name: AgentName) -> AgentAdapter:
     return {AgentName.claude: ClaudeCodeAdapter, AgentName.agy: AntigravityAdapter}[name]()
 
 
-@app.callback()
-def _main() -> None:
-    """Keeps `ask` and `usage` as explicit subcommands."""
+@app.callback(invoke_without_command=True)
+def _main(
+    ctx: typer.Context,
+    theme: Optional[str] = typer.Option(None, "--theme", help="Colour theme: dark or light (default: config ui.theme, ORCH_THEME, else dark)."),
+    ascii_: bool = typer.Option(False, "--ascii", help="ASCII glyphs only (automatic when the terminal cannot show the star glyphs)."),
+) -> None:
+    """Choose the theme; with no subcommand, show the home screen."""
+    cfg, cfg_error = None, None
+    try:
+        cfg = load_config()
+    except ConfigError as e:
+        cfg_error = str(e)
+    try:
+        set_theme(resolve_theme(theme, ascii_, cfg.ui.theme if cfg else None))
+    except ValueError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2)
+    if ctx.invoked_subcommand is None:
+        console = Console()
+        for line in home_mod.render_home(home_mod.build_home(cfg, config_error=cfg_error), current_theme()):
+            console.print(line)
 
 
 @app.command()
@@ -297,11 +322,12 @@ def next_commands(run_dir: Path, repo_name: str | None = None) -> list[str]:
 
 def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
     meta = load_meta(run_dir)
-    lines = [f"Run: {run_dir.name}  status: {meta.get('status')}"]
+    total_time = duration(meta.get("started_at"), meta.get("ended_at"))
+    lines = [f"Run: {run_dir.name}  status: {meta.get('status')}" + (f"  time: {fmt_elapsed(total_time)}" if total_time is not None else "")]
     if meta.get("models"):
         routed = {r["role"]: r for r in meta.get("routing") or []}
         lines.append("Planning models: " + ", ".join(
-            f"{r}={m}" + (" (fallback)" if routed.get(r, {}).get("fallback") else "") for r, m in meta["models"].items()
+            f"{demon_name(r)}={m}" + (" (fallback)" if routed.get(r, {}).get("fallback") else "") for r, m in meta["models"].items()
         ))
     ex = meta.get("exec")
     if ex:
@@ -312,7 +338,7 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
             lines.append(f"Paused until {_local(after)}")
     if meta.get("merged_sha"):
         lines.append(f"Merged into {meta.get('merged_into')} as {meta['merged_sha'][:8]}")
-    lines.append(f"{'step':<6}{'status':<19}{'tokens':>9}  {'tests':<12}{'rounds':<8}{'review':<9}{'commit':<10}title")
+    lines.append(f"{'step':<6}{'status':<19}{'tokens':>9}  {'tests':<12}{'rounds':<8}{'review':<9}{'commit':<10}{'time':<8}title")
     for sid, s in (meta.get("steps") or {}).items():
         t = s.get("tests")
         tests = "-" if not t else ("pass" if t["passed"] else f"FAIL({t['exit_code']})")
@@ -321,13 +347,13 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
         rounds = str(s.get("rounds_total", 0))
         lines.append(
             f"{sid:<6}{s['status']:<19}{s.get('tokens', 0):>9}  {tests:<12}{rounds:<8}{verdict:<9}"
-            f"{(s.get('commit') or '-')[:8]:<10}{s['title']}"
+            f"{(s.get('commit') or '-')[:8]:<10}{fmt_elapsed(duration(s.get('started_at'), s.get('ended_at'))):<8}{s['title']}"
         )
         if s.get("roles_tokens"):
-            lines.append("      tokens by role: " + ", ".join(f"{r}={n}" for r, n in s["roles_tokens"].items()))
+            lines.append("      tokens by role: " + ", ".join(f"{demon_name(r)}={n}" for r, n in s["roles_tokens"].items()))
         if s.get("roles_used"):
             lines.append("      models used: " + ", ".join(
-                f"{r}={u['entry']}" + (" (fallback)" if u.get("fallback") else "") for r, u in s["roles_used"].items()
+                f"{demon_name(r)}={u['entry']}" + (" (fallback)" if u.get("fallback") else "") for r, u in s["roles_used"].items()
             ))  # fmt: skip
         for r in s.get("rounds") or []:
             lines.append(f"      round {r['n']}: {'+'.join(r['reasons'])}; {r['session']}; review={r.get('verdict') or '-'}"
@@ -348,12 +374,26 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
     if not meta.get("steps"):
         lines.append("(not started)")
     by_role, total = run_tokens(meta)
-    lines.append(f"Run tokens: {total:,} total (" + ", ".join(f"{r}={n:,}" for r, n in by_role.items()) + ")")
+    lines.append(f"Run tokens: {total:,} total (" + ", ".join(f"{demon_name(r)}={n:,}" for r, n in by_role.items()) + ")")
     nxt = next_commands(run_dir, repo_name)
     if nxt:
         lines.append("Needs from you:")
         lines += [f"  {n}" for n in nxt]
     return "\n".join(lines)
+
+
+def _emit_status(run_dir: Path, repo_name: str | None = None, header: bool = True) -> None:
+    """Constellation + demon lines (coloured on a terminal, plain otherwise), then the detailed step table."""
+    if header:
+        view = build_run_view(load_meta(run_dir))
+        theme = current_theme()
+        if sys.stdout.isatty():
+            Console().print(render_rich(view, theme, with_footer=False))
+        else:
+            for line in render_plain(view, theme):
+                typer.echo(line)
+        typer.echo("")
+    typer.echo(_status_table(run_dir, repo_name))
 
 
 PLAIN_OPT = typer.Option(False, "--plain", help="Line-by-line output, no live table (automatic when not a terminal).")
@@ -373,7 +413,7 @@ def _result_text(outcome) -> str:
 
 
 def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None, **kw) -> None:
-    view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()})
+    view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()}, current_theme())
     ex = Executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
                   on_update=view.on_update, hidden_tests=hidden_tests)  # fmt: skip
     try:
@@ -383,7 +423,7 @@ def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = Fals
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
     typer.echo("")
-    typer.echo(_status_table(run_dir, target.name))
+    _emit_status(run_dir, target.name, header=not view.live)
     typer.echo(f"\nResult: {_result_text(outcome)}")
     nxt = next_commands(run_dir, target.name)
     for n in nxt:
@@ -578,7 +618,31 @@ def status(
 ) -> None:
     """Step table: status, tokens, test result, commit."""
     target = _repo_or_exit(load_config(), repo)
-    typer.echo(_status_table(_find_or_exit(target, run_id), target.name))
+    _emit_status(_find_or_exit(target, run_id), target.name)
+
+
+@app.command()
+def doctor(
+    live: bool = typer.Option(False, "--live", help="Also make one tiny 'Reply PONG' call per CLI (uses a little plan quota)."),
+) -> None:
+    """Check the setup: tools, logins, leftover env vars, config, repos, paths. Exit 1 if anything is wrong."""
+    theme = current_theme()
+    console = Console()
+    checks = doctor_mod.run_checks(doctor_mod.Context())
+    if live:
+        typer.echo("--live makes one tiny call to claude (sonnet) and one to agy; each costs ~13k-20k tokens of plan quota.")
+        if typer.confirm("Make the calls?", default=False):
+            checks += doctor_mod.live_checks(lambda name: get_adapter(AgentName(name)))
+        else:
+            typer.echo("Skipped the live calls.")
+    for line in render_doctor(checks, theme):
+        console.print(line)
+    bad = sum(c.level == doctor_mod.ERR for c in checks)
+    warn = sum(c.level == doctor_mod.WARN for c in checks)
+    console.print("")
+    console.print(Text(f"{len(checks)} checks: {bad} failed, {warn} to look at.",
+                       style=theme.style("error" if bad else ("warning" if warn else "success"))))  # fmt: skip
+    raise typer.Exit(doctor_mod.exit_code(checks))
 
 
 STOPPED_STATUSES = ("awaiting_approval", "needs_input", "failed")

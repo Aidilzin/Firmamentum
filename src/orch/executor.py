@@ -258,6 +258,10 @@ def _parse_report(result: AgentResult) -> BuildReport | None:
     return _parse_json(result, BuildReport)[0]
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
 def new_step_state(title: str) -> dict:
     return {
         "title": title, "status": "pending", "tokens": 0, "calls": 0, "tests": None, "commit": None,
@@ -335,12 +339,27 @@ class Executor:
 
     def _set_step(self, sid: str, **kw) -> dict:
         s = self.meta["steps"][sid]
+        prev, new = s.get("status"), kw.get("status")
+        if new is not None and new != prev:  # timestamps are data only: the latest running segment of the step
+            if new == "running":
+                s["started_at"] = _utc_now()
+                s.pop("ended_at", None)
+            elif prev == "running":
+                s["ended_at"] = _utc_now()
         s.update(kw)
         self._save()
         return s
 
+    def _mark_run_start(self) -> None:
+        self.meta.setdefault("started_at", _utc_now())
+        self.meta.pop("ended_at", None)
+
+    def _mark_run_end(self) -> None:
+        self.meta["ended_at"] = _utc_now()
+
     def _stop(self, run_status: str, sid: str, message: str) -> ExecOutcome:
         self.meta["status"] = run_status
+        self._mark_run_end()
         self._save()
         return ExecOutcome(run_status, sid, message)
 
@@ -413,6 +432,7 @@ class Executor:
             self.meta["exec"]["hidden_tests"] = {"dir": str(self.hidden_tests), "step": None, "files": []}
         self.meta["steps"] = {s.id: new_step_state(s.title) for s in self.plan.topo_order()}
         self.meta["status"] = "executing"
+        self._mark_run_start()
         self._save()
         return self._loop()
 
@@ -422,6 +442,7 @@ class Executor:
             return ExecOutcome("done", None, "already done")
         self.meta["status"] = "executing"
         self.meta.pop("resume_after", None)
+        self._mark_run_start()
         self._save()
         return self._loop()
 
@@ -461,6 +482,7 @@ class Executor:
         else:
             raise ExecError(f"step {sid} has no recorded stop reason; it cannot be approved")
         self.meta["status"] = "executing"
+        self._mark_run_start()
         self._save()
         return self._loop()
 
@@ -478,6 +500,7 @@ class Executor:
         phase = "need_repair" if st.get("stage") == "repair" else None
         self._set_step(sid, status="pending", answers=answers, resume_phase=phase, question=None, stage=None)
         self.meta["status"] = "executing"
+        self._mark_run_start()
         self._save()
         return self._loop()
 
@@ -501,6 +524,7 @@ class Executor:
             if outcome is not None:
                 return outcome
         self.meta["status"] = "done"
+        self._mark_run_end()
         self._save()
         return ExecOutcome("done", None, "all steps done")
 

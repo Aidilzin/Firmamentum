@@ -32,6 +32,7 @@ To record it:
 - [Quickstart](#quickstart)
 - [Setup on Windows](#setup-on-windows)
 - [Commands](#commands)
+- [Screens, theme and doctor](#screens-theme-and-doctor)
 - [Configuration](#configuration)
 - [Safety model](#safety-model)
 - [Cost](#cost)
@@ -120,6 +121,7 @@ Every command that takes a run id also accepts a unique prefix of it and `--repo
 | `ask` | Sends one prompt to one CLI and logs the usage | `orch ask --agent claude --model sonnet --prompt "Reply PONG"` |
 | `usage` | Calls, tokens and failures per agent and model (`--days`, `--window 5h`, `--json`) | `orch usage --window 24h` |
 | `cooldowns` | Lists active rate-limit cooldowns, or clears them with `--clear [claude\|agy]` | `orch cooldowns --clear claude` |
+| `doctor` | Checks the setup: tools, logins, leftover env vars, config, repos, paths (`--live` makes one tiny call per CLI) | `orch doctor` |
 | `version` | Prints the orch, claude and agy versions (costs no quota) | `orch version` |
 | `plan` | Asks Laplace for a plan and stores it (`--scout` adds Brillouin) | `orch plan "add a --json flag to usage" --repo orch` |
 | `runs` | Lists stored runs, newest first | `orch runs --repo orch` |
@@ -137,7 +139,7 @@ Every command that takes a run id also accepts a unique prefix of it and `--repo
 
 Exit codes of `exec`, `run`, `resume`, `approve` and `answer`: 0 done, 1 failed, 2 needs input, needs approval or refused, 3 paused.
 
-**Live view.** `exec`, `run`, `resume`, `approve` and `answer` show a live table with step, title, status, phase, role, entry used (marked `(fallback)` when it is not the first choice), repair round, tokens and elapsed time, plus a footer with total tokens and run status. When a run stops, a panel says what happened, why, and the exact next command. Use `--plain`, or pipe the output, for line-by-line text with a `--- STOPPED ---` block instead.
+**Live view.** `exec`, `run`, `resume`, `approve` and `answer` draw the constellation and one line per demon (see [Screens, theme and doctor](#screens-theme-and-doctor)), with the model used (marked `(fallback)` when it is not the first choice), plus a footer with total tokens and run status. When a run stops, a panel says what happened, why, and the exact next command. Use `--plain`, or pipe the output, for line-by-line text with a `--- STOPPED ---` block instead.
 
 **Practice mode.** `orch run` and `orch exec` accept `--hidden-tests DIR`. It copies the files of `DIR` into the worktree's `tests/` after Maxwell finishes the first step and before the checks, so Maxwell never saw them and a real repair round happens. Use it for practice repos only. `DIR` must be outside the repo and outside any worktree, and its file names must not already exist in `tests/`. Create the practice repo with `uv run python scripts/make_practice_repo.py`. It makes `C:\projects\orch-practice` and the uncommitted sibling `C:\projects\orch-practice-hidden`. The request used for the practice checks is narrow on purpose, so the builder does not cover the hidden tests (repeated separators, trimming `-`) on the first try:
 
@@ -146,6 +148,32 @@ uv run orch run "Make slugify in src/practice/text.py strip accents, for example
 ```
 
 The reviewer and the repair agent are told the copied files were added on purpose. Repair must not delete or edit them.
+
+## Screens, theme and doctor
+
+**Home.** `orch` with no arguments prints the wordmark once, then your repos, the model each demon tries first, tokens used in the last 5h and 24h, active cooldowns, the latest run and a few example commands. `orch --help` is the normal help.
+
+**Constellation.** Steps are drawn as stars, with one line for each demon that has run or is running:
+
+```
+✦───✦───✧───·  step 3 of 4 · Add tests
+✦ Laplace     planned 4 steps            opus · 44k
+◆ Maxwell     building s3                sonnet · 0:41
+```
+
+`✦` done, `✧` running (in the colour of the demon working), `·` pending, `✗` failed, `!` needs you. Every state also has a glyph and a word, never colour alone. `orch status` shows the same header above its step table, with a `time` column filled from the `started_at` / `ended_at` stamps the executor now writes to `meta.json` (older runs show `-`).
+
+| Demon | Role | Glyph | ASCII | Dark | Light |
+|---|---|---|---|---|---|
+| Laplace | planner | ✦ | `*` | `#7AA2F7` | `#2E5EAA` |
+| Brillouin | scout | ◎ | `o` | `#7DCFFF` | `#0E7C86` |
+| Maxwell | builder | ◆ | `#` | `#FF9E64` | `#B85C00` |
+| Loschmidt | reviewer | ↺ | `<` | `#BB9AF7` | `#7A4FC2` |
+| Descartes | repair | ✚ | `+` | `#F38BA8` | `#B4235A` |
+
+**Theme.** Dark is the default. Choose with, in this order: `--theme dark|light` (before the subcommand: `orch --theme light status ...`), the `ORCH_THEME` environment variable, or `ui: { theme: light }` in `config.yaml`. No background colour is ever set. `NO_COLOR` turns colour off and keeps the glyphs. `--ascii`, or a terminal that cannot encode the glyphs, switches to `* o # < +` and `[ok] [!] [x]`.
+
+**`orch doctor`.** Prints `✓` / `!` / `✗` per check with a one-line fix, never a secret value, and exits 1 if any check is `✗`. It checks Python, `uv`, `git`, `claude` and `agy` (found, `--version`, on PATH), `ANTHROPIC_API_KEY` / `AUTH_TOKEN` / `BASE_URL` in the process and the Windows user environment, `~/.claude/settings.json` (an `ANTHROPIC_*` `env` block, or a local `model` such as `qwen3:8b`, which points Claude Code away from your Pro login), the Claude login type (via `claude auth status`, which makes no model call; `agy` has no such command, so doctor tells you to check it by hand), `config.yaml`, each repo (path, git, `test_command`), that the worktree root and usage DB are writable, `tzdata`, and active cooldowns. `agy` missing is `!`, and `✗` only when some role lists agy entries only. `orch doctor --live` asks for confirmation, then sends one "Reply PONG" to each CLI (cheapest model) to prove the logins work; it costs plan quota, so it is off by default.
 
 ## Configuration
 
@@ -171,6 +199,7 @@ approval_rules:                         # the stops listed under "Safety model"
   - all_agents_rate_limited
 review: per_step                        # per_step | off
 max_repair_rounds: 3
+ui: { theme: dark }                     # dark | light (optional)
 repos:                                  # the ONLY source of test commands
   orch:     { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
   practice: { path: "../orch-practice", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }

@@ -298,7 +298,7 @@ def test_resume_after_in_the_past_resumes_normally(env, tmp_path, monkeypatch):
     (run_dir / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     budget.clear_cooldowns()
     r = runner.invoke(cli.app, ["resume", run_dir.name, "--repo", "demo"])
-    assert r.exit_code == 0 and "models used: builder=claude:sonnet" in r.output
+    assert r.exit_code == 0 and "models used: Maxwell=claude:sonnet" in r.output
 
 
 # ---------- cooldowns CLI ----------

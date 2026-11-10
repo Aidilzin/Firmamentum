@@ -62,8 +62,14 @@ class RepoConfig(BaseModel):
     retest_command: str | None = None  # repair rounds only; never from a plan
 
 
+class UiConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    theme: Literal["dark", "light"] = "dark"
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    ui: UiConfig = UiConfig()
     roles: dict[str, list[Entry]]
     fallback_model: dict[str, str] = {}  # superseded by role lists; accepted and ignored
     cooldown_minutes: int = 60

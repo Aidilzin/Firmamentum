@@ -158,7 +158,7 @@ def test_cli_exec_plain_output_and_stop_block(env, tmp_path, monkeypatch):
     r = CliRunner().invoke(cli.app, ["exec", run_dir.name, "--repo", "demo", "--plain"])
     assert r.exit_code == 2, r.output
     out = r.output
-    assert "[s1] Do s1: running builder" in out  # log lines unchanged
+    assert "[s1] Do s1: Maxwell (builder) building" in out  # demon name, role in brackets on first mention
     assert "Result: awaiting_approval" in out
     nxt = f"orch approve {run_dir.name} --step s1 --repo demo"
     assert f"Next: {nxt}" in out
@@ -226,7 +226,7 @@ def test_live_view_renders_table_and_panel():
         view.show_stop("awaiting_approval", "s1", "tests_removed: tests/a.py", {"steps": {"s1": {"rule": "tests_removed"}}},
                        ["orch approve r --step s1"])  # fmt: skip
     text = buf.getvalue()
-    assert "running builder" in text and "Slugify" in text and "claude:sonnet (fallback)" in text
+    assert "Maxwell (builder) building" in text and "Slugify" in text and "sonnet (fallback)" in text
     assert "total 12,345 tokens" in text and "orch approve r --step s1" in text and "Run awaiting_approval" in text
 
 
@@ -339,7 +339,7 @@ def test_run_total_equals_sum_of_every_role_and_every_call(env, tmp_path):
     assert by_role == {"scout": 7, "planner": 11, "builder": 100, "repair": 300, "reviewer": 50}
     assert total == sum(seen) == sum(by_role.values()) == 468
     assert total == meta["total_tokens"] + meta["exec_tokens"]  # planning + execution
-    assert "Run tokens: 468 total (scout=7, planner=11, builder=100" in cli._status_table(run_dir, "demo")
+    assert "Run tokens: 468 total (Brillouin=7, Laplace=11, Maxwell=100" in cli._status_table(run_dir, "demo")
 
 
 def test_run_tokens_for_older_metas():
