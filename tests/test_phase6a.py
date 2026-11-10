@@ -389,8 +389,15 @@ def test_doctor_agy_missing_is_a_warning_unless_a_role_needs_only_agy(tmp_path):
     cfg_with_fallback.write_text(yaml.safe_dump(data), encoding="utf-8")
     c = by_name(doctor.run_checks(ctx_for(tmp_path, which=no_agy, config_path=cfg_with_fallback)))
     assert c["agy"].level == doctor.WARN
-    only = by_name(doctor.run_checks(ctx_for(tmp_path, which=no_agy, config_path=_cfg_file(tmp_path))))  # scout: [agy:default]
-    assert only["agy"].level == doctor.ERR and "scout" in only["agy"].detail
+    scout_only = by_name(doctor.run_checks(ctx_for(tmp_path, which=no_agy, config_path=_cfg_file(tmp_path))))  # scout: [agy:default]
+    assert scout_only["agy"].level == doctor.WARN and "orch run --scout will not work" in scout_only["agy"].detail  # scout is opt-in
+    for role in ("planner", "reviewer"):  # builder/repair cannot be agy-only: config validation forbids it
+        cfg = _cfg_file(tmp_path, name=f"{role}.yaml")
+        data = yaml.safe_load(cfg.read_text())
+        data["roles"][role] = ["agy:default"]
+        cfg.write_text(yaml.safe_dump(data), encoding="utf-8")
+        only = by_name(doctor.run_checks(ctx_for(tmp_path, which=no_agy, config_path=cfg)))
+        assert only["agy"].level == doctor.ERR and role in only["agy"].detail
 
 
 def test_doctor_missing_claude_git_python_uv(tmp_path):

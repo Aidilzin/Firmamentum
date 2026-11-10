@@ -13,7 +13,7 @@ Built and tested with fakes only (no real CLI call, no quota). `claude --help`, 
 ## Decisions worth knowing
 - **Step timestamps** are the latest running segment of a step (a step that is answered or retried starts a new segment); the run's `started_at` is its first start and `ended_at` its last stop. Waiting for a human is not counted inside a step, but is inside the run total.
 - **Login type**: `claude auth status --json` exists and makes no model call, so doctor uses it and shows only the login method and plan. `agy` has no status command (`agy --help` lists none), so doctor prints `!` with how to check by hand.
-- **agy missing** is `!`, and `✗` only when some role lists agy entries only. The shipped `config.yaml` has `scout: [agy:default]`, so by that rule a missing agy is `✗` there. Say so if scout should be exempt.
+- **agy missing** is `!`, and `✗` only when planner, builder, reviewer or repair lists agy entries only. Scout is opt-in (`--scout`), so it is exempt: with `scout: [agy:default]` the `!` says "orch run --scout will not work".
 - `orch status` / `exec` output keeps its detailed table (tests pin it); role keys in it became demon names (`Maxwell=...`), and a `time` column was added.
 - Elapsed time shown live comes from the live view's clock; stored runs use the new stamps, older metas show `-`.
 

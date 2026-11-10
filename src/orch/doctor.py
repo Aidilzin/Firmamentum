@@ -197,7 +197,12 @@ def check_login(ctx: Context) -> list[Check]:
 
 
 def _agy_only_roles(cfg: Config) -> list[str]:
-    return [r for r, entries in cfg.roles.items() if entries and all(e.agent == "agy" for e in entries)]
+    """Roles that cannot run without agy. Scout is opt-in (`--scout`), so it never makes agy mandatory."""
+    return [r for r, entries in cfg.roles.items() if r != "scout" and entries and all(e.agent == "agy" for e in entries)]
+
+
+def _scout_needs_agy(cfg: Config | None) -> bool:
+    return bool(cfg and cfg.roles.get("scout") and all(e.agent == "agy" for e in cfg.roles["scout"]))
 
 
 def check_agy(ctx: Context, cfg: Config | None) -> Check:
@@ -206,7 +211,9 @@ def check_agy(ctx: Context, cfg: Config | None) -> Check:
     only = _agy_only_roles(cfg) if cfg else []
     level_missing = ERR if only else WARN
     if not path:
-        why = f"; role(s) {', '.join(only)} have only agy entries" if only else " (optional: scout and the reviewer's third fallback)"
+        why = f"; role(s) {', '.join(only)} have only agy entries" if only else " (optional: the reviewer's third fallback)"
+        if not only and _scout_needs_agy(cfg):
+            why += "; orch run --scout will not work"
         return Check("agy", level_missing, "not found on PATH" + why, fix)
     return check_cli(ctx, "agy", level_missing, fix)
 
