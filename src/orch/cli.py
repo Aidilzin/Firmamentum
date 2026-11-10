@@ -283,6 +283,11 @@ def next_commands(run_dir: Path, repo_name: str | None = None) -> list[str]:
             out.append(f"(step {sid} failed: {st.get('error')}; see {run_dir / 'steps' / sid}; start a new run)")
         elif status == "pending" and st.get("error") == "rate limited":
             out.append(f"{_cmd(rid, repo_name, f'resume {rid}')}   # after the usage limit resets")
+    ex = meta.get("exec") or {}
+    if ex.get("worktree") and Path(ex["worktree"]).is_dir():
+        for sid, st in (meta.get("steps") or {}).items():
+            if st["status"] in STOPPED_STATUSES and not st.get("commit"):
+                out.append(f"{_cmd(rid, repo_name, f'diff {rid} --step {sid}')}   # the uncommitted change of this step")
     if meta.get("status") == "paused" and not out:
         out.append(_cmd(rid, repo_name, f"resume {rid}"))
     if meta.get("status") == "done" and not meta.get("merged_sha"):
@@ -569,6 +574,13 @@ def status(
     typer.echo(_status_table(_find_or_exit(target, run_id), target.name))
 
 
+STOPPED_STATUSES = ("awaiting_approval", "needs_input", "failed")
+
+
+def _uncommitted_header(sid: str, st: dict) -> str:
+    return f"# step {sid} ({st.get('status')}): UNCOMMITTED changes in the worktree (git diff HEAD plus new files)\n"
+
+
 @app.command()
 def diff(
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
@@ -591,11 +603,15 @@ def diff(
             if s.get("commit"):
                 typer.echo(workspace.diff(target.path, f"{s['commit']}^", s["commit"]))
             elif Path(ex["worktree"]).is_dir():
-                typer.echo(workspace.diff_uncommitted(Path(ex["worktree"])))
+                typer.echo(_uncommitted_header(step, s) + workspace.diff_uncommitted(Path(ex["worktree"])))
             else:
                 typer.echo(f"(step {step} has no commit)")
         else:
             typer.echo(workspace.diff(target.path, ex["base_sha"], ex["branch"]))
+            wt = Path(ex["worktree"])
+            for sid, s in (meta.get("steps") or {}).items():  # stopped steps have changes that are not committed yet
+                if s.get("status") in STOPPED_STATUSES and not s.get("commit") and wt.is_dir():
+                    typer.echo(_uncommitted_header(sid, s) + workspace.diff_uncommitted(wt))
     except workspace.WorkspaceError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)

@@ -346,3 +346,46 @@ def test_run_tokens_for_older_metas():
     assert run_tokens({"total_tokens": 46021}) == ({"planner": 46021}, 46021)
     by_role, total = run_tokens({"total_tokens": 10, "exec_tokens": 90})
     assert total == 100 and by_role["unattributed"] == 90
+
+
+# ---------- orch diff for stopped steps ----------
+
+
+def _stopped_run(env, tmp_path, monkeypatch):
+    repo, setup, executor = env
+    _cfg(tmp_path, monkeypatch, repo)
+    run_dir, _ = setup(plan=good_plan(steps=[step("s1", files=["src/s1.py", ".env"])]))
+    monkeypatch.setattr(cli, "get_adapter", lambda name: FakeBuilder([edit({"src/s1.py": "a = 1\n", ".env": "K=1\n"})]))
+    r = CliRunner().invoke(cli.app, ["exec", run_dir.name, "--repo", "demo"])
+    assert r.exit_code == 2, r.output
+    return run_dir, r
+
+
+def test_diff_of_a_step_stopped_for_approval_shows_uncommitted_changes(env, tmp_path, monkeypatch):
+    run_dir, r = _stopped_run(env, tmp_path, monkeypatch)
+    assert load_meta(run_dir)["steps"]["s1"]["status"] == "awaiting_approval"
+    out = CliRunner().invoke(cli.app, ["diff", run_dir.name, "--step", "s1", "--repo", "demo"]).output
+    assert "UNCOMMITTED" in out and "+a = 1" in out and "+K=1" in out  # tracked-to-be and untracked files
+    whole = CliRunner().invoke(cli.app, ["diff", run_dir.name, "--repo", "demo"]).output  # no --step: same section
+    assert "UNCOMMITTED" in whole and "+a = 1" in whole
+    cmd = f"orch diff {run_dir.name} --step s1 --repo demo"
+    assert f"Next: {cmd}" in r.output  # printed with the stop's Next lines
+    assert cmd in cli.next_commands(run_dir, "demo")[-1]
+
+
+def test_diff_of_committed_steps_is_unchanged_and_has_no_header(env, tmp_path, monkeypatch):
+    repo, setup, executor = env
+    _cfg(tmp_path, monkeypatch, repo)
+    run_dir, _ = setup(plan=good_plan(steps=[step("s1")]))
+    monkeypatch.setattr(cli, "get_adapter", lambda name: FakeBuilder([edit({"src/s1.py": "a = 1\n"})]))
+    assert CliRunner().invoke(cli.app, ["exec", run_dir.name, "--repo", "demo"]).exit_code == 0
+    for args in ([], ["--step", "s1"]):
+        out = CliRunner().invoke(cli.app, ["diff", run_dir.name, "--repo", "demo", *args]).output
+        assert "+a = 1" in out and "UNCOMMITTED" not in out
+    assert not any("diff" in n and "--step" in n for n in cli.next_commands(run_dir, "demo"))
+
+
+def test_diff_hint_absent_when_worktree_is_gone(env, tmp_path, monkeypatch):
+    run_dir, _ = _stopped_run(env, tmp_path, monkeypatch)
+    CliRunner().invoke(cli.app, ["clean", run_dir.name, "--repo", "demo"])
+    assert not any(n.startswith(f"orch diff") for n in cli.next_commands(run_dir, "demo"))
