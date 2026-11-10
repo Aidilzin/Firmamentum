@@ -74,7 +74,8 @@ def save_outcome(
         "status": status,
         "created": (created or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
         "models": models,
-        "total_tokens": outcome.total_tokens,
+        "total_tokens": outcome.total_tokens,  # planning only (scout + planner); see run_tokens() for the whole run
+        "plan_role_tokens": plan_role_tokens(outcome),
         "error": outcome.error,
         "routing": outcome.routes,
     }
@@ -82,6 +83,30 @@ def save_outcome(
         meta["resume_after"] = outcome.resume_after.astimezone(timezone.utc).isoformat(timespec="seconds")
     _dump(run_dir / "meta.json", meta)
     return meta
+
+
+def plan_role_tokens(outcome) -> dict[str, int]:
+    """Planning tokens by role: scout (if used) and planner (every attempt)."""
+    out: dict[str, int] = {}
+    if outcome.scout is not None:
+        out["scout"] = outcome.scout.total_tokens
+    out["planner"] = sum(a.result.total_tokens for a in outcome.attempts)
+    return out
+
+
+def run_tokens(meta: dict) -> tuple[dict[str, int], int]:
+    """(tokens by role, total) for the WHOLE run: planning (scout, planner) plus execution (builder, reviewer, repair).
+
+    total == sum(by_role) == meta['total_tokens'] (planning) + meta['exec_tokens'] (execution)."""
+    plan = dict(meta.get("plan_role_tokens") or {"planner": int(meta.get("total_tokens", 0))})  # older runs: all planner
+    by_role = {r: n for r, n in plan.items() if n}
+    exec_roles = meta.get("role_tokens") or {}
+    for r, n in exec_roles.items():
+        by_role[r] = by_role.get(r, 0) + n
+    missing = int(meta.get("exec_tokens", 0)) - sum(exec_roles.values())
+    if missing > 0:  # runs executed before per-role totals were kept
+        by_role["unattributed"] = missing
+    return by_role, sum(by_role.values())
 
 
 @dataclass
@@ -123,7 +148,7 @@ def list_runs(repo: Path) -> list[RunInfo]:
     for d in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
         m = _read_meta(d) or {}
         out.append(
-            RunInfo(d.name, m.get("status", "incomplete"), m.get("created", ""), int(m.get("total_tokens", 0)), d)
+            RunInfo(d.name, m.get("status", "incomplete"), m.get("created", ""), run_tokens(m)[1], d)
         )
     return out
 

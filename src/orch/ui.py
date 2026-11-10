@@ -10,6 +10,7 @@ import sys
 import time
 from typing import Callable
 
+from .runs import run_tokens
 from rich.console import Console, Group
 from rich.live import Live
 from rich.panel import Panel
@@ -59,7 +60,7 @@ def step_rows(meta: dict, first_entries: dict[str, str], elapsed: dict[str, floa
 
 
 def footer_text(meta: dict, elapsed_total: float) -> str:
-    total = meta.get("exec_tokens", 0)
+    total = run_tokens(meta)[1]
     return f"total {total:,} tokens | run: {meta.get('status', '?')} | {fmt_elapsed(elapsed_total)}"
 
 

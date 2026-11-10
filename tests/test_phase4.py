@@ -277,7 +277,9 @@ def test_rate_limit_in_repair_pauses_and_resumes_in_place(env):
     ex2, fb2 = executor(run_dir, rr, [edit({"ok.txt": "1"})], review="off", max_repair_rounds=3)
     assert ex2.resume().status == "done"
     s1 = load_meta(run_dir)["steps"]["s1"]
-    assert s1["rounds_used"] == 1 and len(fb2.requests) == 1 and (Path(load_meta(run_dir)["exec"]["worktree"]) / "a.py").exists()
+    # Phase 5b: the rate-limited call counted as round 1, the resumed call is round 2
+    assert [r["outcome"] for r in s1["rounds"]] == ["rate_limited", "ok"] and s1["rounds_used"] == 2
+    assert len(fb2.requests) == 1 and (Path(load_meta(run_dir)["exec"]["worktree"]) / "a.py").exists()
 
 
 # ---------- tests_removed ----------

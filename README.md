@@ -97,7 +97,13 @@ Exit codes of `exec/run/resume/approve`: 0 done, 1 failed, 2 needs input / appro
 
 **Live view.** `exec`, `run`, `resume`, `approve` and `answer` show a live table (step, title, status, phase, role, entry used with `(fallback)` marked, repair round, tokens, elapsed) and a footer with total tokens and run status. When a run stops, a panel says what happened, why, and the exact next command. `--plain` (or any non-terminal stdout) gives plain line-by-line output with a `--- STOPPED ---` block instead.
 
-**Practice mode.** `orch run/exec ... --hidden-tests DIR` copies the files of `DIR` into the worktree's `tests/` after the builder finishes the first step and before the checks, so the builder never saw them and a real repair round happens. For practice repos only: `DIR` must be outside the repo and any worktree, and file names must not already exist in `tests/`. Create the practice repo with `uv run python scripts/make_practice_repo.py` (makes `C:\projects\orch-practice` and the not-committed `C:\projects\orch-practice-hidden`).
+**Practice mode.** `orch run/exec ... --hidden-tests DIR` copies the files of `DIR` into the worktree's `tests/` after the builder finishes the first step and before the checks, so the builder never saw them and a real repair round happens. For practice repos only: `DIR` must be outside the repo and any worktree, and file names must not already exist in `tests/`. The request used for the practice checks is deliberately narrow, so the builder does not cover the hidden tests (repeated separators, trimming `-`) on the first try and a real repair round is needed:
+
+```
+uv run orch run "Make slugify in src/practice/text.py strip accents, for example 'Café' becomes 'cafe'" --repo practice --hidden-tests ../orch-practice-hidden
+```
+
+The orchestrator tells the reviewer and the repair agent that the copied files were added on purpose (no scope flag; repair must not delete or edit them). Create the practice repo with `uv run python scripts/make_practice_repo.py` (makes `C:\projects\orch-practice` and the not-committed `C:\projects\orch-practice-hidden`).
 
 ## Safety model
 

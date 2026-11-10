@@ -130,6 +130,17 @@ def build_prompt(plan: Plan, step: Step, done_titles: list[str], test_command: s
     return "\n".join(lines)
 
 
+HIDDEN_NOTE_REVIEW = (
+    "## Files added by the orchestrator on purpose\n"
+    "{files} were added by the orchestrator on purpose (extra tests the builder did not see). Do not flag them as "
+    "scope creep or an unrequested file. Do review whether the code makes them pass."
+)
+HIDDEN_NOTE_REPAIR = (
+    "## Files added by the orchestrator on purpose\n"
+    "{files} were added by the orchestrator on purpose. Never delete, rename or edit them; change the code so "
+    "they pass."
+)
+
 RESUME_HEADER = (
     "You are now in REPAIR mode for the step you just worked on. Fix only what is described below, with the "
     "smallest change. Never weaken, skip or delete tests. No git, no dependency changes, stay in the working "
@@ -139,7 +150,7 @@ RESUME_HEADER = (
 
 def repair_prompt(
     plan: Plan, step: Step, ctx: dict, test_tail: str, input_dir: Path, test_command: str,
-    retest_command: str | None, answers: list[str] | None = None,
+    retest_command: str | None, answers: list[str] | None = None, hidden_files: list[str] | None = None,
 ) -> str:  # fmt: skip
     reasons = []
     if "tests" in ctx["reasons"]:
@@ -162,6 +173,8 @@ def repair_prompt(
         lines.append("")
     if answers:
         lines += ["## Answers from the human to your earlier question", *[f"- {a}" for a in answers], ""]
+    if hidden_files:
+        lines += [HIDDEN_NOTE_REPAIR.format(files=", ".join(hidden_files)), ""]
     lines += [
         f"## Files for this round (read-only folder): {input_dir}",
         "- diff.patch (the current uncommitted change of this step), test_tail.txt, review_issues.json",
@@ -175,7 +188,10 @@ def repair_prompt(
     return "\n".join(lines)
 
 
-def review_prompt(plan: Plan, step: Step, diff_path: Path, test_command: str, inline_role: str | None = None) -> str:
+def review_prompt(
+    plan: Plan, step: Step, diff_path: Path, test_command: str, inline_role: str | None = None,
+    hidden_files: list[str] | None = None,
+) -> str:  # fmt: skip
     lines = [inline_role, ""] if inline_role else []
     lines += [
         "## Goal", plan.goal, "",
@@ -186,8 +202,10 @@ def review_prompt(plan: Plan, step: Step, diff_path: Path, test_command: str, in
         f"Read this file first: {diff_path}",
         "It is the unified diff of this step's uncommitted change in the current working directory (new files included).",
         f"The orchestrator already ran `{test_command}` and it passed.", "",
-        "Reply with the JSON review only.",
     ]  # fmt: skip
+    if hidden_files:
+        lines += [HIDDEN_NOTE_REVIEW.format(files=", ".join(hidden_files)), ""]
+    lines += ["Reply with the JSON review only."]
     return "\n".join(lines)
 
 
@@ -307,6 +325,7 @@ class Executor:
         self.wt: Path = Path()
         self.last_entry: Entry | None = None  # entry that served the most recent agent call
         self._resume_after: datetime | None = None
+        self.last_called = False  # False when the last _agent() found every entry cooling and called nothing
 
     # -- meta --
     def _save(self) -> None:
@@ -501,9 +520,11 @@ class Executor:
         self._resume_after = routed.resume_after if routed.paused else None
         if routed.paused and routed.rate_limited is None:  # nothing was called: all entries already cooling
             self.last_entry = None
+            self.last_called = False
             return failure(self.cfg.roles[role_name][0].agent, ErrorKind.RATE_LIMITED, "all entries are in cooldown")
         result = routed.rate_limited if routed.paused else routed.result
         assert result is not None
+        self.last_called = True
         self.last_entry = routed.entry
         st = self._st(sid)
         sdir = self.run_dir / "steps" / sid
@@ -740,7 +761,8 @@ class Executor:
 
         def full_prompt(entry: Entry) -> str:
             _, inline = reviewer_args(entry.agent, role_text, sdir.resolve())
-            return review_prompt(self.plan, step, diff_path.resolve(), self.test_command, inline)
+            return review_prompt(self.plan, step, diff_path.resolve(), self.test_command, inline,
+                                 self._st(sid).get("hidden_files") or None)  # fmt: skip
 
         def call(make: Callable[[Entry], tuple[str, str | None]]) -> AgentResult:
             """make(entry) -> (prompt, resume_id). Args are per entry: a fallback to agy runs in --mode plan."""
@@ -798,7 +820,8 @@ class Executor:
         tail = tail_lines(sdir / st["last_failure"], TAIL_LINES) if "tests" in ctx["reasons"] and st.get("last_failure") else ""
         (rin / "test_tail.txt").write_text(tail or "(no test failure this round)\n", encoding="utf-8")
         (rin / "review_issues.json").write_text(json.dumps(ctx["issues"], indent=2) + "\n", encoding="utf-8")
-        prompt = repair_prompt(self.plan, step, ctx, tail, rin.resolve(), self.test_command, self.retest_command, st["answers"])
+        prompt = repair_prompt(self.plan, step, ctx, tail, rin.resolve(), self.test_command, self.retest_command,
+                               st["answers"], st.get("hidden_files") or None)  # fmt: skip
         args = repair_args(self.test_command, self.retest_command, repair_instructions(), rin.resolve())
         schema = load_schema_file()
 
@@ -828,20 +851,31 @@ class Executor:
                 result, mode, resume_failed = None, "fresh", True
         if result is None:
             result = call(False)
+        report = _parse_report(result) if result.ok else None
+        if not result.ok:
+            if result.error_kind == ErrorKind.RATE_LIMITED:
+                outcome = "rate_limited"
+            else:
+                outcome = f"failed: {result.error_kind.value}"
+        elif report is not None and report.blocked:
+            outcome = "blocked"
+        else:
+            outcome = "ok"
+        called = self.last_called  # False only when every entry was cooling and nothing was called
+        st = self._st(sid)
+        if called:  # a repair call that was made counts as a round whatever its outcome
+            st["rounds"].append({
+                "n": n, "reasons": ctx["reasons"], "session": mode, "resume_failed": resume_failed, "outcome": outcome,
+                "tokens": st["roles_tokens"].get("repair", 0) - before, "retest": None, "tests": None, "verdict": None,
+            })  # fmt: skip
+            self._set_step(sid, rounds_used=st["rounds_used"] + 1, rounds_total=n)
         if not result.ok:
             return self._agent_stop(sid, "repair", result, "need_repair")
-        report = _parse_report(result)
         if report is None:
             self._warn(sid, "repair reply was not a valid report; relying on git and the tests")
         elif report.blocked:
             self._set_step(sid, status="needs_input", question=report.question, stage="repair")
             return self._stop("needs_input", sid, f"repair is blocked: {report.question}")
-        st = self._st(sid)
-        st["rounds"].append({
-            "n": n, "reasons": ctx["reasons"], "session": mode, "resume_failed": resume_failed,
-            "tokens": st["roles_tokens"].get("repair", 0) - before, "retest": None, "tests": None, "verdict": None,
-        })  # fmt: skip
-        self._set_step(sid, rounds_used=st["rounds_used"] + 1, rounds_total=n)
         return None
 
     def _exhausted(self, step: Step) -> ExecOutcome:

@@ -22,7 +22,7 @@ from .ui import make_view
 from .merge import MergeError, merge_run
 from .plan import format_plan
 from .planner import make_plan
-from .runs import RunNotFound, create_run, find_run, list_runs, load_meta, load_plan, save_outcome, write_meta
+from .runs import RunNotFound, create_run, find_run, list_runs, load_meta, load_plan, run_tokens, save_outcome, write_meta
 
 app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.", no_args_is_help=True)
 
@@ -325,7 +325,8 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
                 f"{r}={u['entry']}" + (" (fallback)" if u.get("fallback") else "") for r, u in s["roles_used"].items()
             ))  # fmt: skip
         for r in s.get("rounds") or []:
-            lines.append(f"      round {r['n']}: {'+'.join(r['reasons'])}; {r['session']}; review={r.get('verdict') or '-'}")
+            lines.append(f"      round {r['n']}: {'+'.join(r['reasons'])}; {r['session']}; review={r.get('verdict') or '-'}"
+                         + (f"; {r['outcome']}" if r.get("outcome") not in (None, "ok") else ""))  # fmt: skip
         for rv in reviews:
             minor = sum(1 for i in rv["issues"] if i["severity"] == "minor")
             lines.append(f"      review (round {rv['round']}): {rv['verdict']}; {len(rv['issues']) - minor} blocking, {minor} minor")
@@ -341,6 +342,8 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
             lines.append(f"      error: {s['error']}")
     if not meta.get("steps"):
         lines.append("(not started)")
+    by_role, total = run_tokens(meta)
+    lines.append(f"Run tokens: {total:,} total (" + ", ".join(f"{r}={n:,}" for r, n in by_role.items()) + ")")
     nxt = next_commands(run_dir, repo_name)
     if nxt:
         lines.append("Needs from you:")
@@ -493,6 +496,10 @@ def _answer_plan(target, cfg, run_dir: Path, text: str) -> None:
     models = meta.get("models") or _planned_models(outcome, cfg, ["planner"])
     new_meta = save_outcome(run_dir, outcome, models)
     new_meta["total_tokens"] += int(meta.get("total_tokens", 0))
+    old_roles = meta.get("plan_role_tokens") or {"planner": int(meta.get("total_tokens", 0))}
+    new_meta["plan_role_tokens"] = {
+        r: new_meta["plan_role_tokens"].get(r, 0) + old_roles.get(r, 0) for r in {*new_meta["plan_role_tokens"], *old_roles}
+    }
     write_meta(run_dir, new_meta)
     (run_dir / "request.md").write_text(request + clarification + "\n", encoding="utf-8")
     typer.echo(f"Run: {run_dir.name}")

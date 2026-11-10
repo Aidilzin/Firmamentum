@@ -228,3 +228,121 @@ def test_live_view_renders_table_and_panel():
     text = buf.getvalue()
     assert "running builder" in text and "Slugify" in text and "claude:sonnet (fallback)" in text
     assert "total 12,345 tokens" in text and "orch approve r --step s1" in text and "Run awaiting_approval" in text
+
+
+# ---------- 5b follow-ups: hidden-file notes, repair rounds, token totals ----------
+
+from plan_factory import result  # noqa: E402
+from test_executor import FILE_CMD, fail, report  # noqa: E402
+from test_phase4 import review  # noqa: E402
+
+from orch.config import ResolvedRepo, load_config  # noqa: E402
+from orch.executor import Executor, repair_prompt, review_prompt  # noqa: E402
+from orch.plan import Plan  # noqa: E402
+from orch.planner import make_plan  # noqa: E402
+from orch.runs import create_run, run_tokens, save_outcome  # noqa: E402
+
+
+def test_prompts_name_hidden_files_only_when_given():
+    plan = Plan.model_validate(good_plan(steps=[step("s1")]))
+    st = plan.steps[0]
+    from pathlib import Path
+
+    rv = review_prompt(plan, st, Path("d.patch"), "pytest", None, ["tests/test_x.py"])
+    assert "tests/test_x.py" in rv and "added by the orchestrator on purpose" in rv
+    assert "Do not flag them as scope creep" in rv and "whether the code makes them pass" in rv
+    assert rv.rstrip().endswith("Reply with the JSON review only.")
+    assert "on purpose" not in review_prompt(plan, st, Path("d.patch"), "pytest", None)
+    ctx = {"reasons": ["review"], "issues": []}
+    rp = repair_prompt(plan, st, ctx, "", Path("in"), "pytest", None, None, ["tests/test_x.py"])
+    assert "tests/test_x.py" in rp and "Never delete, rename or edit them" in rp
+    assert "on purpose" not in repair_prompt(plan, st, ctx, "", Path("in"), "pytest", None)
+
+
+def test_reviewer_and_repair_calls_get_the_hidden_note(env, tmp_path):
+    repo, setup, executor = env
+    run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=HID_CMD)
+    reject = review("reject", [{"severity": "major", "file": "src/s1.py", "line": 1, "problem": "p", "fix": "f"}])
+    ex, fb = executor(
+        run_dir, rr,
+        [edit({"src/s1.py": "a = 1\n", "fixed.txt": "ok\n"}), reject, edit({"src/s1.py": "a = 2\n"}), review("approve")],
+        max_repair_rounds=3, review="per_step",
+    )  # fmt: skip
+    ex.hidden_tests = hidden_dir(tmp_path)
+    assert ex.start().status == "done"
+    reviewer1, repair, reviewer2 = fb.requests[1], fb.requests[2], fb.requests[3]
+    for req in (reviewer1, reviewer2):
+        assert "tests/hid_extra.py" in req.prompt and "Do not flag them as scope creep" in req.prompt
+    assert "tests/hid_extra.py" in repair.prompt and "Never delete, rename or edit them" in repair.prompt
+    assert "added by the orchestrator on purpose" not in fb.requests[0].prompt  # the builder is never told
+
+
+BLOCKED = lambda req: AgentResult(  # noqa: E731
+    agent="claude", ok=True, error_kind=ErrorKind.OK, session_id="s", total_tokens=40,
+    structured=report(blocked=True, question="how?"))  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    "actions,status,outcome",
+    [
+        ([BLOCKED], "needs_input", "blocked"),
+        ([fail(ErrorKind.RATE_LIMITED)], "paused", "rate_limited"),
+        ([fail(ErrorKind.AGENT_ERROR), fail(ErrorKind.AGENT_ERROR)], "failed", "failed: AGENT_ERROR"),  # resume, then fresh
+    ],
+)
+def test_a_repair_call_counts_as_a_round_whatever_its_outcome(env, actions, status, outcome):
+    repo, setup, executor = env
+    run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=FILE_CMD)
+    ex, fb = executor(run_dir, rr, [edit({"src/s1.py": "a\n"}), *actions], max_repair_rounds=3)
+    assert ex.start().status == status
+    s1 = load_meta(run_dir)["steps"]["s1"]
+    assert s1["rounds_used"] == 1 and s1["rounds_total"] == 1
+    assert [(r["n"], r["outcome"]) for r in s1["rounds"]] == [(1, outcome)]
+    table = cli._status_table(run_dir, "demo")
+    assert "round 1: tests;" in table and outcome in table
+
+
+def test_successful_round_is_recorded_ok(env):
+    repo, setup, executor = env
+    run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=FILE_CMD)
+    ex, fb = executor(run_dir, rr, [edit({"src/s1.py": "a\n"}), edit({"ok.txt": "x\n"})], max_repair_rounds=3)
+    assert ex.start().status == "done"
+    assert load_meta(run_dir)["steps"]["s1"]["rounds"][0]["outcome"] == "ok"
+
+
+def test_run_total_equals_sum_of_every_role_and_every_call(env, tmp_path):
+    repo, setup, executor = env
+    seen = []
+
+    def wrap(r):
+        def action(req):
+            out = r(req) if callable(r) else r
+            seen.append(out.total_tokens)
+            return out
+
+        return action
+
+    scout = wrap(result(text="notes", tokens=7, agent="agy"))
+    planner = wrap(result(good_plan(steps=[step("s1")]), tokens=11))
+    actions = [scout, planner, wrap(edit({"src/s1.py": "a\n"}, tokens=100)), wrap(edit({"ok.txt": "x\n"}, tokens=300)),
+               wrap(review("approve", tokens=50))]  # fmt: skip
+    fb = FakeBuilder(actions)
+    rr = ResolvedRepo(name="demo", path=repo, test_command=FILE_CMD)
+    cfg = load_config().model_copy(update={"review": "per_step", "max_repair_rounds": 3})
+    outcome = make_plan("do it", rr, cfg, lambda n: fb, use_scout=True)
+    assert outcome.plan is not None
+    run_dir = create_run(repo, "do it")
+    save_outcome(run_dir, outcome, {})
+    assert Executor(rr, run_dir, cfg, lambda n: fb).start().status == "done"
+    meta = load_meta(run_dir)
+    by_role, total = run_tokens(meta)
+    assert by_role == {"scout": 7, "planner": 11, "builder": 100, "repair": 300, "reviewer": 50}
+    assert total == sum(seen) == sum(by_role.values()) == 468
+    assert total == meta["total_tokens"] + meta["exec_tokens"]  # planning + execution
+    assert "Run tokens: 468 total (scout=7, planner=11, builder=100" in cli._status_table(run_dir, "demo")
+
+
+def test_run_tokens_for_older_metas():
+    assert run_tokens({"total_tokens": 46021}) == ({"planner": 46021}, 46021)
+    by_role, total = run_tokens({"total_tokens": 10, "exec_tokens": 90})
+    assert total == 100 and by_role["unattributed"] == 90
