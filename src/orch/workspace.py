@@ -164,6 +164,18 @@ def check_head(wt: Path, base_sha: str, branch: str) -> str | None:
     return None
 
 
+def step_commit_at_head(wt: Path, base_sha: str, step_id: str, branch: str | None = None) -> str | None:
+    """HEAD's sha when it is exactly one commit above `base_sha` with orch's own subject `orch(<id>): ...`, else None.
+    Used after a crash between `git commit` and saving meta.json, so a finished commit is not seen as an agent's."""
+    wt = _guard(wt, branch=branch)
+    head = head_sha(wt)
+    if head == base_sha:
+        return None
+    parent = git(wt, "rev-parse", "HEAD^", check=False).stdout.strip()
+    subject = git(wt, "log", "-1", "--format=%s").stdout.strip()
+    return head if parent == base_sha and subject.startswith(f"orch({step_id}):") else None
+
+
 def commit_step(wt: Path, step_id: str, title: str, paths: list[str] | None = None, branch: str | None = None) -> str:
     """Commit as `orch(<id>): <title>`. `paths` limits staging (so test artifacts are not committed)."""
     wt = _guard(wt, branch=branch)

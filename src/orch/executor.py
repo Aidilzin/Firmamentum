@@ -46,6 +46,20 @@ DENIED_BASH = ("Bash(git)", "Bash(git *)", "Bash(uv add*)", "Bash(uv pip*)", "Ba
 
 AdapterFactory = Callable[[str], AgentAdapter]
 
+# A step found `running` after a crash continues at its stored phase when repeating that phase is safe. `build` and
+# `repair` are not: a killed agent leaves partial edits, so they reset the worktree and rebuild from zero.
+RESUMABLE_PHASES = ("checks", "tests", "review", "need_repair", "commit")
+# State of one build attempt. A rebuild clears it (cost counters, answers and risk approval are kept).
+ATTEMPT_FIELDS = (
+    "rounds", "rounds_used", "rounds_total", "repair_ctx", "reviews", "last_failure", "session_id", "session_entry",
+    "approved", "tests", "changed_files", "flagged", "flagged_items", "hidden_files", "summary",
+)  # fmt: skip
+
+
+def resume_point(phase: str | None) -> str | None:
+    """Phase to continue at for a step that was `running` when the process died; None means rebuild from zero."""
+    return phase if phase in RESUMABLE_PHASES else None
+
 
 class ExecError(RuntimeError):
     """A precondition failed; nothing was run."""
@@ -327,6 +341,7 @@ class Executor:
         self.last_entry: Entry | None = None  # entry that served the most recent agent call
         self._resume_after: datetime | None = None
         self._lock: runlock.RunLock | None = None
+        self._crash_commit_sid: str | None = None  # a step found `running` at phase commit: its commit may already exist
         self.last_called = False  # False when the last _agent() found every entry cooling and called nothing
 
     # -- meta --
@@ -522,6 +537,10 @@ class Executor:
             if any(steps[d]["status"] != "done" for d in step.depends_on):
                 return self._stop("failed", step.id, f"step {step.id} depends on an unfinished step")
             phase = st.get("resume_phase")
+            if phase is None and st["status"] == "running":  # the process died mid-step
+                phase = resume_point(st.get("phase"))
+                if phase == "commit":
+                    self._crash_commit_sid = step.id
             if step.risk_flags and not st["risk_approved"] and phase is None:
                 self._set_step(step.id, status="awaiting_approval", stage="pre_builder", rule=", ".join(step.risk_flags))
                 return self._stop("awaiting_approval", step.id, f"step {step.id} has risk flags: {', '.join(step.risk_flags)}")
@@ -604,6 +623,7 @@ class Executor:
         (self.run_dir / "steps" / sid).mkdir(parents=True, exist_ok=True)
         if phase is None:
             workspace.reset_to_head(self.wt, self._branch)  # a crashed or paused step may have left partial edits
+            self._reset_attempt(sid)
             self._set_step(sid, base_sha=workspace.head_sha(self.wt))
             self._set_step(sid, status="running", error=None, question=None, warnings=[], phase="build", stage=None,
                            rule=None, resume_phase=None)  # fmt: skip
@@ -619,6 +639,19 @@ class Executor:
             if not self._st(sid).get("base_sha"):
                 self._set_step(sid, base_sha=workspace.head_sha(self.wt))
         return self._pipeline(step, phase)
+
+    def _reset_attempt(self, sid: str) -> None:
+        """A step rebuilt from zero starts with a clean attempt: no rounds, reviews, session or approvals of the dead one.
+        Hidden tests copied for this step are deleted by the reset, so the copy must happen again."""
+        s, fresh = self._st(sid), new_step_state("")
+        for k in ATTEMPT_FIELDS:
+            if k in fresh:
+                s[k] = fresh[k]
+            else:
+                s.pop(k, None)
+        rec = (self.meta.get("exec") or {}).get("hidden_tests")
+        if rec and rec.get("step") == sid:
+            rec.update(step=None, files=[])
 
     def _build(self, step: Step) -> ExecOutcome | None:
         assert self.plan is not None
@@ -951,9 +984,14 @@ class Executor:
     def _commit(self, step: Step, sdir: Path) -> ExecOutcome | None:
         sid = step.id
         st = self._st(sid)
-        if (stop := self._check_git_state(sid)) is not None:
-            return stop
-        sha = workspace.commit_step(self.wt, sid, step.title, st.get("changed_files") or [], self._branch)
+        sha = None
+        if self._crash_commit_sid == sid and st.get("base_sha"):  # crashed after `git commit`, before meta was saved
+            sha = workspace.step_commit_at_head(self.wt, st["base_sha"], sid, self._branch)
+        self._crash_commit_sid = None
+        if sha is None:
+            if (stop := self._check_git_state(sid)) is not None:
+                return stop
+            sha = workspace.commit_step(self.wt, sid, step.title, st.get("changed_files") or [], self._branch)
         (sdir / "diff.patch").write_text(workspace.diff(self.wt, f"{sha}^", sha), encoding="utf-8")
         self._set_step(sid, status="done", commit=sha, phase=None, resume_phase=None, repair_ctx=None)
         self.log(f"[{sid}] done {sha[:8]}")
