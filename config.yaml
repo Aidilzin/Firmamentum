@@ -16,6 +16,7 @@ approval_rules:
   - plan_needs_input
   - all_agents_rate_limited
 review: per_step          # per_step | off
+allow_agy_reviewer: false # agy read-only mode is only partly verified; set true to let agy:default review
 max_repair_rounds: 3
 repos:
   orch: { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }

@@ -149,6 +149,14 @@ def record_rate_limit(
 # ---------- picking ----------
 
 
+def role_entries(role: str, cfg: Config) -> list[Entry]:
+    """The role's usable entries: agy entries are skipped for the reviewer unless `allow_agy_reviewer` is true."""
+    entries = cfg.roles[role]
+    if role == "reviewer" and not cfg.allow_agy_reviewer:
+        entries = [e for e in entries if e.agent != "agy"]
+    return entries
+
+
 def _free_at(entry: Entry, cooldowns: list[budget.Cooldown]) -> datetime | None:
     """None when the entry is usable now, else when its last covering cooldown ends."""
     ends = [c.until for c in cooldowns if c.agent == entry.agent and budget.model_matches(c.model, entry.model)]
@@ -162,7 +170,7 @@ def pick(
     now = now or datetime.now(timezone.utc)
     cds = budget.active_cooldowns(now, db_path)
     waits = []
-    for e in cfg.roles[role]:
+    for e in role_entries(role, cfg):
         free = _free_at(e, cds)
         if free is None:
             return e, None
@@ -173,7 +181,7 @@ def pick(
 def earliest_cooldown(role: str, cfg: Config, now: datetime, db_path: Path | None = None) -> datetime | None:
     """Earliest end among active cooldowns that cover any entry of the role (used when the hop limit stops a call)."""
     cds = budget.active_cooldowns(now, db_path)
-    ends = [c.until for e in cfg.roles[role] for c in cds if c.agent == e.agent and budget.model_matches(c.model, e.model)]
+    ends = [c.until for e in role_entries(role, cfg) for c in cds if c.agent == e.agent and budget.model_matches(c.model, e.model)]
     return min(ends) if ends else None
 
 
@@ -202,7 +210,7 @@ def call_role(
     def clock() -> datetime:
         return now or datetime.now(timezone.utc)
 
-    entries = cfg.roles[role]
+    entries = role_entries(role, cfg)
     entry, earliest = pick(role, cfg, clock(), db_path)
     if entry is None:
         return Routed(None, None, paused=True, resume_after=earliest)

@@ -395,6 +395,7 @@ def test_doctor_agy_missing_is_a_warning_unless_a_role_needs_only_agy(tmp_path):
         cfg = _cfg_file(tmp_path, name=f"{role}.yaml")
         data = yaml.safe_load(cfg.read_text())
         data["roles"][role] = ["agy:default"]
+        data["allow_agy_reviewer"] = True  # an agy-only reviewer is only valid when opted in
         cfg.write_text(yaml.safe_dump(data), encoding="utf-8")
         only = by_name(doctor.run_checks(ctx_for(tmp_path, which=no_agy, config_path=cfg)))
         assert only["agy"].level == doctor.ERR and role in only["agy"].detail

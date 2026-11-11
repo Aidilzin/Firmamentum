@@ -211,7 +211,7 @@ def check_agy(ctx: Context, cfg: Config | None) -> Check:
     only = _agy_only_roles(cfg) if cfg else []
     level_missing = ERR if only else WARN
     if not path:
-        why = f"; role(s) {', '.join(only)} have only agy entries" if only else " (optional: the reviewer's third fallback)"
+        why = f"; role(s) {', '.join(only)} have only agy entries" if only else " (optional: scout, and reviewer fallback only if allow_agy_reviewer is true)"
         if not only and _scout_needs_agy(cfg):
             why += "; orch run --scout will not work"
         return Check("agy", level_missing, "not found on PATH" + why, fix)

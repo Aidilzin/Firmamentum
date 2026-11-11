@@ -231,7 +231,8 @@ def test_invalid_review_retry_on_a_fallback_entry_gets_the_full_prompt(env):
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))
     bad = raw_review({"verdict": "approve", "issues": [issue("major")], "summary": "x"})
     # opus returns an invalid review; the same-session retry is rate limited; the router hops to agy:default
-    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"}), bad, fail(ErrorKind.RATE_LIMITED), review("approve")], **ON)
+    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"}), bad, fail(ErrorKind.RATE_LIMITED), review("approve")],
+                      allow_agy_reviewer=True, **ON)
     assert ex.start().status == "done"
     first, retry_same, hopped = fb.requests[1], fb.requests[2], fb.requests[3]
     assert retry_same.resume_id == "rs" and "Read this file first" not in retry_same.prompt  # short prompt, same session
@@ -268,7 +269,8 @@ def test_rate_limit_in_review_pauses_and_resumes_in_place(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))
     # opus is limited -> claude:* cools -> the one allowed hop goes to agy:default, which is limited too -> pause
-    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"}), fail(ErrorKind.RATE_LIMITED), fail(ErrorKind.RATE_LIMITED)], **ON)
+    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"}), fail(ErrorKind.RATE_LIMITED), fail(ErrorKind.RATE_LIMITED)],
+                      allow_agy_reviewer=True, **ON)
     out = ex.start()
     assert out.status == "paused"
     assert fb.requests[2].extra_args[:2] == ["--mode", "plan"]

@@ -98,6 +98,8 @@ class Config(BaseModel):
     repos: dict[str, RepoConfig] = {}
     review: Literal["per_step", "off"] = "per_step"
     max_repair_rounds: int = 3
+    # agy's read-only mode is only partly verified (docs/probe-results.md), so agy reviews only when this is true.
+    allow_agy_reviewer: bool = False
     base_dir: Path = Path(".")  # directory of config.yaml; relative repo paths resolve against it
 
     @field_validator("roles", mode="before")
@@ -120,6 +122,8 @@ class Config(BaseModel):
         for role, entries in self.roles.items():
             if not entries:
                 raise ValueError(f"roles.{role}: needs at least one entry")
+        if not self.allow_agy_reviewer and all(e.agent == "agy" for e in self.roles["reviewer"]):
+            raise ValueError("roles.reviewer: only agy entries, but allow_agy_reviewer is false; add a claude entry or opt in")
         for role in ("builder", "repair"):
             bad = [e.label for e in self.roles[role] if e.agent != "claude"]
             if bad:

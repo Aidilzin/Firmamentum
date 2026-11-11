@@ -59,7 +59,9 @@ def test_pick_none_returns_earliest_until():
     entry, wait = pick("planner", CFG, NOW)
     assert entry is None and wait == NOW + timedelta(hours=3)
     budget.record_cooldown("agy", "*", NOW + timedelta(hours=1), "y", NOW)
-    assert pick("reviewer", CFG, NOW) == (None, NOW + timedelta(hours=1))  # earliest over the role's entries
+    on = CFG.model_copy(update={"allow_agy_reviewer": True})
+    assert pick("reviewer", on, NOW) == (None, NOW + timedelta(hours=1))  # earliest over the role's entries
+    assert pick("reviewer", CFG, NOW) == (None, NOW + timedelta(hours=3))  # agy is not a reviewer by default
 
 
 # ---------- cooldown scope ----------
@@ -238,7 +240,8 @@ def test_reviewer_falls_back_to_agy_in_plan_mode(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))
     # opus rate limited with a generic message -> claude:* cools -> hop to agy:default, which approves
-    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"}), fail(ErrorKind.RATE_LIMITED), review("approve")], **ON)
+    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"}), fail(ErrorKind.RATE_LIMITED), review("approve")],
+                      allow_agy_reviewer=True, **ON)
     assert ex.start().status == "done"
     review_req = fb.requests[2]
     assert review_req.extra_args[:2] == ["--mode", "plan"] and review_req.model is None
@@ -366,3 +369,36 @@ def test_usage_window_filters_by_agent_and_model(tmp_path):
 @pytest.mark.parametrize("bad", ["5", "h", "0h", "5x", "-1h"])
 def test_usage_window_rejects_bad_values(bad):
     assert runner.invoke(cli.app, ["usage", "--window", bad]).exit_code == 2
+
+
+# ---------- agy reviewer opt-in ----------
+
+
+def test_agy_reviewer_is_off_by_default_and_agy_entries_are_skipped():
+    assert CFG.allow_agy_reviewer is False
+    from orch.router import role_entries
+
+    assert [e.label for e in role_entries("reviewer", CFG)] == ["claude:opus", "claude:sonnet"]
+    on = CFG.model_copy(update={"allow_agy_reviewer": True})
+    assert [e.label for e in role_entries("reviewer", on)][-1] == "agy:default"
+    assert [e.label for e in role_entries("scout", CFG)] == ["agy:default"]  # only the reviewer is gated
+
+
+def test_reviewer_never_hops_to_agy_unless_allowed(tmp_path):
+    db = tmp_path / "u.db"
+    factory, made = fakes_for({"claude": [rl("Opus limit reached"), rl("Sonnet limit reached")], "agy": [result(text="x", agent="agy")]})
+    routed = call_role("reviewer", build(), factory, CFG, now=NOW, db_path=db)
+    assert routed.paused and "agy" not in made
+    budget.record_cooldown("claude", "*", NOW + timedelta(hours=2), "limit", NOW, db)
+    entry, earliest = pick("reviewer", CFG, NOW, db)
+    assert entry is None and earliest == NOW + timedelta(hours=2)  # agy:default was free but is not a candidate
+    on = CFG.model_copy(update={"allow_agy_reviewer": True})
+    assert pick("reviewer", on, NOW, db)[0].label == "agy:default"
+
+
+def test_config_rejects_an_agy_only_reviewer_unless_opted_in():
+    roles = {**{r: list(es) for r, es in CFG.roles.items()}, "reviewer": [Entry(agent="agy", model=None)]}
+    with pytest.raises(ValueError, match="allow_agy_reviewer"):
+        type(CFG).model_validate({**CFG.model_dump(), "roles": roles})
+    ok = type(CFG).model_validate({**CFG.model_dump(), "roles": roles, "allow_agy_reviewer": True})
+    assert ok.roles["reviewer"][0].agent == "agy"
