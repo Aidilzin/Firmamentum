@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import signal
 import sys
 import textwrap
+import threading
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -124,6 +126,7 @@ def usage(
     since = now - delta
     rows = summary(since)
     by_model = summary_by_model(since)
+    cancelled = budget.unknown_token_calls(since)
     if json_out:
         payload = {
             "days": days,
@@ -131,6 +134,7 @@ def usage(
             "since": since.isoformat(timespec="seconds"),
             "agents": [asdict(r) for r in rows],
             "models": [asdict(r) for r in by_model],
+            "cancelled_calls": cancelled,
         }
         typer.echo(json.dumps(payload, indent=2))
         return
@@ -140,6 +144,8 @@ def usage(
         typer.echo("(no calls logged)")
     for r in by_model:
         typer.echo(f"{r.agent:<8}{r.model:<22}{r.calls:>8}{r.tokens:>12}{r.failures:>10}")
+    if cancelled:
+        typer.echo(f"{cancelled} call(s) cancelled, tokens unknown (counted as 0)")
 
 
 def parse_window(text: str) -> timedelta:
@@ -280,7 +286,7 @@ def _load_cfg(model: list[str] | None):
         raise typer.Exit(2)
 
 
-EXIT_CODES = {"done": 0, "failed": 1, "needs_input": 2, "awaiting_approval": 2, "paused": 3, "rejected": 1}
+EXIT_CODES = {"done": 0, "failed": 1, "needs_input": 2, "awaiting_approval": 2, "paused": 3, "rejected": 1, "cancelled": 130}
 
 
 def _cmd(run_id: str, repo_name: str | None, text: str) -> str:
@@ -309,12 +315,14 @@ def next_commands(run_dir: Path, repo_name: str | None = None) -> list[str]:
             out.append(f"(step {sid} failed: {st.get('error')}; see {run_dir / 'steps' / sid}; start a new run)")
         elif status == "pending" and st.get("error") == "rate limited":
             out.append(f"{_cmd(rid, repo_name, f'resume {rid}')}   # after the usage limit resets")
+        elif status == "pending" and st.get("error") == "cancelled":
+            out.append(f"{_cmd(rid, repo_name, f'resume {rid}')}   # stopped by you")
     ex = meta.get("exec") or {}
     if ex.get("worktree") and Path(ex["worktree"]).is_dir():
         for sid, st in (meta.get("steps") or {}).items():
             if st["status"] in STOPPED_STATUSES and not st.get("commit"):
                 out.append(f"{_cmd(rid, repo_name, f'diff {rid} --step {sid}')}   # the uncommitted change of this step")
-    if meta.get("status") == "paused" and not out:
+    if meta.get("status") in ("paused", "cancelled") and not out:
         out.append(_cmd(rid, repo_name, f"resume {rid}"))
     if is_stale(run_dir, meta):
         out.append(f"{_cmd(rid, repo_name, f'resume {rid}')}   # the run died mid-step")
@@ -417,16 +425,46 @@ def _result_text(outcome) -> str:
     return outcome.status + (f" ({outcome.step_id})" if outcome.step_id else "") + (f": {outcome.message}" if outcome.message else "")
 
 
+def _install_sigint(ex: Executor):
+    """Ctrl-C during a run: 1st press cancels (the agent is killed, the step saved), 2nd stops now (waits only for a
+    commit or a save in progress), 3rd exits at once. The default handler is NOT put back while stopping.
+    Returns the previous handler, or None when not on the main thread."""
+    if threading.current_thread() is not threading.main_thread():
+        return None
+    presses = 0
+
+    def handler(signum, frame) -> None:
+        nonlocal presses
+        presses += 1
+        if presses == 1:
+            sys.stderr.write("\nstopping the run (Ctrl-C again: stop now)\n")
+            ex.cancel()
+        elif presses == 2:
+            ex.stop_now()
+        else:
+            raise SystemExit(130)
+
+    return signal.signal(signal.SIGINT, handler)
+
+
+def _restore_sigint(previous) -> None:
+    if previous is not None:
+        signal.signal(signal.SIGINT, previous)
+
+
 def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None, **kw) -> None:
     view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()}, current_theme())
     ex = Executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
                   on_update=view.on_update, hidden_tests=hidden_tests)  # fmt: skip
+    previous = _install_sigint(ex)
     try:
         with view:
             outcome: ExecOutcome = getattr(ex, action)(**kw)
     except (ExecError, workspace.WorkspaceError, RunNotFound) as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
+    finally:
+        _restore_sigint(previous)
     typer.echo("")
     _emit_status(run_dir, target.name, header=not view.live)
     typer.echo(f"\nResult: {_result_text(outcome)}")

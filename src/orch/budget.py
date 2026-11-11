@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .adapters.base import AgentAdapter, AgentRequest, AgentResult
+from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS calls (
@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS calls (
     cache_write_tokens INTEGER NOT NULL,
     total_tokens INTEGER NOT NULL,
     cost_usd REAL,
-    cwd TEXT
+    cwd TEXT,
+    tokens_unknown INTEGER NOT NULL DEFAULT 0  -- 1: the call was cancelled, so its tokens are stored as 0
 )
 """
 
@@ -55,6 +56,9 @@ def _connect(db_path: Path | None) -> sqlite3.Connection:
     conn = sqlite3.connect(path)
     conn.execute(SCHEMA)
     conn.execute(COOLDOWN_SCHEMA)
+    if "tokens_unknown" not in {row[1] for row in conn.execute("PRAGMA table_info(calls)")}:  # a DB made before P3
+        with conn:
+            conn.execute("ALTER TABLE calls ADD COLUMN tokens_unknown INTEGER NOT NULL DEFAULT 0")
     return conn
 
 
@@ -64,8 +68,8 @@ def log_call(result: AgentResult, request: AgentRequest, db_path: Path | None = 
         with conn:
             conn.execute(
                 "INSERT INTO calls (ts, agent, model, ok, error_kind, duration_ms, input_tokens, output_tokens,"
-                " cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, cwd)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " cache_read_tokens, cache_write_tokens, total_tokens, cost_usd, cwd, tokens_unknown)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     datetime.now(timezone.utc).isoformat(timespec="seconds"),
                     result.agent,
@@ -80,6 +84,7 @@ def log_call(result: AgentResult, request: AgentRequest, db_path: Path | None = 
                     result.total_tokens,
                     result.cost_usd,
                     str(request.cwd),
+                    int(result.error_kind == ErrorKind.CANCELLED),
                 ),
             )
     finally:
@@ -114,6 +119,20 @@ def summary(since: datetime, db_path: Path | None = None) -> list[AgentSummary]:
     finally:
         conn.close()
     return [AgentSummary(agent=a, calls=c, tokens=t, failures=f) for a, c, t, f in rows]
+
+
+def unknown_token_calls(since: datetime, db_path: Path | None = None) -> int:
+    """Calls since `since` whose tokens were not known (cancelled mid-call)."""
+    if since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    conn = _connect(db_path)
+    try:
+        return conn.execute(
+            "SELECT COUNT(*) FROM calls WHERE ts >= ? AND tokens_unknown = 1",
+            (since.astimezone(timezone.utc).isoformat(timespec="seconds"),),
+        ).fetchone()[0]
+    finally:
+        conn.close()
 
 
 @dataclass

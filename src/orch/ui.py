@@ -57,7 +57,7 @@ def stop_text(info: StopInfo) -> list[str]:
 
 
 RUN_WORD = {  # every state has a word as well as a glyph
-    "executing": "running", "done": "done", "paused": "paused", "failed": "failed", "rejected": "rejected",
+    "executing": "running", "done": "done", "paused": "paused", "cancelled": "stopped by you", "failed": "failed", "rejected": "rejected",
     "awaiting_approval": "needs your approval", "needs_input": "needs your answer", "planned": "planned",
 }
 

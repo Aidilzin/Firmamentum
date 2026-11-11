@@ -15,7 +15,7 @@ from . import runlock
 from .plan import Plan
 from .planner import PlannerOutcome
 
-STATUSES = ("planned", "needs_input", "failed", "executing", "paused", "awaiting_approval", "done")
+STATUSES = ("planned", "needs_input", "failed", "executing", "paused", "cancelled", "awaiting_approval", "done")
 STEP_STATES = ("pending", "running", "done", "failed", "needs_input", "awaiting_approval")
 
 

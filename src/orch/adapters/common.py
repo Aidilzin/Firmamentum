@@ -38,6 +38,8 @@ def parse_process_json(
 ) -> tuple[dict | None, AgentResult | None]:
     """Return (parsed_json, None) on success or (None, failed_result)."""
     tail = out.stderr_tail
+    if out.cancelled:
+        return None, failure(agent, ErrorKind.CANCELLED, "cancelled", tail, duration_ms=out.elapsed_ms)
     if out.not_found:
         return None, failure(agent, ErrorKind.NOT_FOUND, out.error, tail)
     if out.error:

@@ -7,12 +7,14 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
 IS_WINDOWS = sys.platform == "win32"
 STDERR_TAIL_CHARS = 2000
+POLL_S = 0.2  # how often a running child is checked for cancel and timeout
 
 
 # Env for every child (workers and test runs) is built from an allow-list, so API keys, tokens and cloud credentials in
@@ -52,6 +54,7 @@ class ProcessOutput:
     stderr: str = ""
     returncode: int | None = None
     timed_out: bool = False
+    cancelled: bool = False  # the caller set the cancel event; the child tree was killed
     not_found: bool = False
     elapsed_ms: int = 0
     error: str = ""  # spawn failure description, if any
@@ -88,8 +91,14 @@ def run_process(
     env: dict[str, str] | None = None,
     stdin_text: str | None = None,
     timeout_s: int = 600,
+    cancel: threading.Event | None = None,
 ) -> ProcessOutput:
+    """Run one child. `cancel` is polled every POLL_S; when it is set the whole child tree is killed and the output
+    comes back with `cancelled=True` (not `timed_out`)."""
     out = ProcessOutput()
+    if cancel is not None and cancel.is_set():
+        out.cancelled = True  # nothing is started
+        return out
     exe = shutil.which(argv[0], path=(env or os.environ).get("PATH")) or argv[0]
     full = [exe, *argv[1:]]
     kwargs: dict = {}
@@ -119,16 +128,30 @@ def run_process(
     try:
         # Binary pipes: encode stdin ourselves so Windows never turns LF into CRLF.
         stdin_bytes = stdin_text.encode("utf-8") if stdin_text is not None else None
-        stdout, stderr = proc.communicate(input=stdin_bytes, timeout=timeout_s)
-        out.returncode = proc.returncode
-    except subprocess.TimeoutExpired:
-        out.timed_out = True
-        kill_tree(proc)
-        try:
-            stdout, stderr = proc.communicate(timeout=10)
-        except Exception:  # pipes held by orphans; give up on the remaining output
-            stdout, stderr = b"", b""
-        out.returncode = proc.returncode
+        deadline = t0 + timeout_s
+        first = True
+        while True:
+            try:  # input goes in on the first call only; retrying after TimeoutExpired loses no output
+                stdout, stderr = proc.communicate(
+                    input=stdin_bytes if first else None, timeout=max(0.0, min(POLL_S, deadline - time.perf_counter()))
+                )
+                out.returncode = proc.returncode
+                break
+            except subprocess.TimeoutExpired:
+                first = False
+                if cancel is not None and cancel.is_set():
+                    out.cancelled = True
+                elif time.perf_counter() >= deadline:
+                    out.timed_out = True
+                else:
+                    continue
+                kill_tree(proc)
+                try:
+                    stdout, stderr = proc.communicate(timeout=10)
+                except Exception:  # pipes held by orphans; give up on the remaining output
+                    stdout, stderr = b"", b""
+                out.returncode = proc.returncode
+                break
     except BaseException:  # Ctrl-C, SystemExit, anything: never leave the child running
         kill_tree(proc)
         try:

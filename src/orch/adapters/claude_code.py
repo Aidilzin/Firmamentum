@@ -82,7 +82,8 @@ class ClaudeCodeAdapter(AgentAdapter):
     def run(self, request: AgentRequest) -> AgentResult:
         spec = self.build_command(request)
         out = run_process(
-            spec.argv, cwd=request.cwd, env=spec.env, stdin_text=spec.stdin_text, timeout_s=request.timeout_s
+            spec.argv, cwd=request.cwd, env=spec.env, stdin_text=spec.stdin_text, timeout_s=request.timeout_s,
+            cancel=request.cancel,
         )
         result = self.parse_output(out, request)
         if result.model == "":

@@ -80,7 +80,7 @@ class AntigravityAdapter(AgentAdapter):
     def run(self, request: AgentRequest) -> AgentResult:
         spec = self.build_command(request)
         try:
-            out = run_process(spec.argv, cwd=request.cwd, env=spec.env, timeout_s=request.timeout_s)
+            out = run_process(spec.argv, cwd=request.cwd, env=spec.env, timeout_s=request.timeout_s, cancel=request.cancel)
             return self.parse_output(out, request)
         finally:
             if spec.prompt_file is not None:

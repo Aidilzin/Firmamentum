@@ -185,7 +185,7 @@ def stop_info(status: str, step_id: str | None, message: str, meta: dict, next_c
         why.append(f"usage limit, resume after {meta['resume_after']}")
     if st.get("summary"):
         why.append(st["summary"])
-    kind = "failed" if status in ("failed", "rejected") else ("paused" if status == "paused" else "needs_you")
+    kind = "failed" if status in ("failed", "rejected") else ("paused" if status in ("paused", "cancelled") else "needs_you")
     return StopInfo(kind, what, "; ".join(why) if why else "-", list(next_cmds))
 
 
@@ -252,8 +252,8 @@ def build_run_view(
         step_index=focus + 1 if steps else 0, step_count=len(steps),
         demons=_demon_lines(meta, steps, models, by_role, raw_steps),
     )  # fmt: skip
-    if stop is None and status in ("failed", "needs_input", "awaiting_approval", "paused", "rejected"):
-        bad = next((s.id for s in steps if s.status in STOPPED_STEP_STATES or s.error == "rate limited"), None)
+    if stop is None and status in ("failed", "needs_input", "awaiting_approval", "paused", "cancelled", "rejected"):
+        bad = next((s.id for s in steps if s.status in STOPPED_STEP_STATES or s.error in ("rate limited", "cancelled")), None)
         stop = (status, bad, "")
     if stop is not None and stop[0] != "done":
         view.stop = stop_info(stop[0], stop[1], stop[2], meta, next_cmds or [])

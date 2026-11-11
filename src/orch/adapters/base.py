@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import re
+import threading
 from abc import ABC, abstractmethod
 from enum import Enum
 from pathlib import Path
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ErrorKind(str, Enum):
@@ -20,6 +21,7 @@ class ErrorKind(str, Enum):
     BAD_JSON = "BAD_JSON"
     AGENT_ERROR = "AGENT_ERROR"
     RATE_LIMITED = "RATE_LIMITED"
+    CANCELLED = "CANCELLED"  # the caller cancelled; tokens are unknown
 
 
 # No real limit message has been seen yet. Add the real ones here (case-insensitive regex).
@@ -39,6 +41,8 @@ def looks_rate_limited(*texts: str | None) -> bool:
 
 
 class AgentRequest(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     prompt: str
     cwd: Path
     model: str | None = None  # passed to --model; None = CLI default
@@ -47,6 +51,7 @@ class AgentRequest(BaseModel):
     resume_id: str | None = None  # session/conversation to continue (wired up, UNTESTED)
     extra_args: list[str] = Field(default_factory=list)  # e.g. permission flags, set by later phases
     env_passthrough: list[str] = Field(default_factory=list)  # extra env var names the child may see (per-repo config)
+    cancel: threading.Event | None = Field(default=None, exclude=True)  # set = kill the child; never serialised
 
 
 class AgentResult(BaseModel):

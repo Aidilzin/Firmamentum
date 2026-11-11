@@ -7,6 +7,7 @@ Every planner/scout/builder/reviewer/repair call goes through `call_role`. The c
 from __future__ import annotations
 
 import re
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,7 +15,7 @@ from typing import Callable
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import budget
-from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind
+from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind, failure
 from .config import Config, Entry
 
 MAX_COOLDOWN = timedelta(days=8)  # a parsed reset further away than this is not believed
@@ -206,23 +207,30 @@ def call_role(
     *,
     now: datetime | None = None,
     db_path: Path | None = None,
+    cancel: threading.Event | None = None,
 ) -> Routed:
+    """A CANCELLED result is final: no cooldown is recorded and there is no fallback hop."""
+
     def clock() -> datetime:
         return now or datetime.now(timezone.utc)
 
     entries = role_entries(role, cfg)
+    if cancel is not None and cancel.is_set():
+        return Routed(failure(entries[0].agent, ErrorKind.CANCELLED, "cancelled before the call"), None)
     entry, earliest = pick(role, cfg, clock(), db_path)
     if entry is None:
         return Routed(None, None, paused=True, resume_after=earliest)
 
     last_rl: AgentResult | None = None
     for hop in range(2):  # the first try, then at most ONE fallback hop
-        req = build_req(entry).model_copy(update={"model": entry.model})
+        req = build_req(entry).model_copy(update={"model": entry.model, "cancel": cancel})
         result = budget.run_agent(get_adapter(entry.agent), req, db_path)
         if result.error_kind != ErrorKind.RATE_LIMITED:
             return Routed(result, entry, fallback=entry != entries[0])
         last_rl = result
         record_rate_limit(entry, result, cfg, clock(), db_path)
+        if cancel is not None and cancel.is_set():  # stopped while the first try was failing: no hop
+            return Routed(failure(entry.agent, ErrorKind.CANCELLED, "cancelled"), entry)
         if hop == 1:
             break
         entry, earliest = pick(role, cfg, clock(), db_path)

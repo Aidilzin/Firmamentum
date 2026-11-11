@@ -1,6 +1,8 @@
 """Execute a stored plan: build -> post-checks -> tests -> review -> commit, with bounded repair rounds.
 
 Step states: pending | running | done | failed | needs_input | awaiting_approval | rejected.
+Run statuses add `cancelled`: `cancel()` (any thread) or a second Ctrl-C (`stop_now()`) kills the running agent or test
+process, writes the step back as `pending` (error "cancelled") with its `resume_phase`, and `resume` continues.
 While a step runs, `phase` is one of build | checks | tests | review | need_repair | repair | commit.
 A step that stops or pauses mid-way stores `stage` (why it stopped) and `resume_phase` (where to continue),
 so `resume`, `approve` and `answer` can pick it up without redoing finished work.
@@ -13,7 +15,9 @@ import functools
 import json
 import shlex
 import shutil
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -67,7 +71,7 @@ class ExecError(RuntimeError):
 
 @dataclass
 class ExecOutcome:
-    status: str  # done | paused | failed | needs_input | awaiting_approval | rejected
+    status: str  # done | paused | cancelled | failed | needs_input | awaiting_approval | rejected
     step_id: str | None = None
     message: str = ""
 
@@ -307,8 +311,15 @@ def _exclusive(fn):
             self._lock = runlock.acquire(self.run_dir)
         except runlock.RunLocked as e:
             raise ExecError(f"run {self.run_dir.name} is being executed by {e.info.describe()}; stop it first") from None
+        self._thread_id = threading.get_ident()
         try:
-            return fn(self, *args, **kwargs)
+            try:
+                return fn(self, *args, **kwargs)
+            except KeyboardInterrupt:  # Ctrl-C (second press) or a raw interrupt: leave a consistent, resumable step
+                outcome = self._interrupted()
+                if outcome is None:
+                    raise
+                return outcome
         finally:
             self._lock.release()
             self._lock = None
@@ -329,6 +340,7 @@ class Executor:
         log: Callable[[str], None] = lambda m: None,
         on_update: Callable[[dict], None] | None = None,
         hidden_tests: Path | None = None,
+        cancel: threading.Event | None = None,
     ):
         self.repo, self.run_dir, self.cfg, self.get_adapter, self.log = repo, run_dir, cfg, get_adapter, log
         self.on_update = on_update  # display only: called with the meta dict after every save
@@ -341,16 +353,68 @@ class Executor:
         self.last_entry: Entry | None = None  # entry that served the most recent agent call
         self._resume_after: datetime | None = None
         self._lock: runlock.RunLock | None = None
+        self._cancel = cancel if cancel is not None else threading.Event()
+        self._thread_id: int | None = None  # the thread running the public call (where a signal handler may raise)
+        self._critical_depth = 0
+        self._stop_pending = False  # a stop-now arrived inside a critical section; it is raised when the section ends
+        self._interrupting = False
         self._crash_commit_sid: str | None = None  # a step found `running` at phase commit: its commit may already exist
         self.last_called = False  # False when the last _agent() found every entry cooling and called nothing
 
+    # -- cancel --
+    def cancel(self) -> None:
+        """Ask the run to stop. Safe from any thread: only sets the event. The thread running the executor kills the
+        child process within one poll and writes the step back as `pending` (error "cancelled")."""
+        self._cancel.set()
+
+    def stop_now(self) -> None:
+        """Second Ctrl-C: cancel, and when called on the executor's own thread (a signal handler) interrupt right away.
+        Inside a critical section (the meta save, the commit) the interrupt waits until the section has finished."""
+        self._cancel.set()
+        if self._interrupting or threading.get_ident() != self._thread_id:
+            return  # already stopping, or another thread: the cancel event is all that can be done
+        if self._critical_depth:
+            self._stop_pending = True
+            return
+        raise KeyboardInterrupt
+
+    @contextmanager
+    def _critical(self):
+        """A short section that must not be cut in two by `stop_now()` (meta save, commit, cost bookkeeping)."""
+        self._critical_depth += 1
+        try:
+            yield
+        finally:
+            self._critical_depth -= 1
+        if self._critical_depth == 0 and self._stop_pending and not self._interrupting:
+            self._stop_pending = False
+            raise KeyboardInterrupt
+
+    def _cancelled(self, sid: str, resume_phase: str | None) -> ExecOutcome:
+        """Write the step back so `resume` continues it, and stop the run as `cancelled`."""
+        self._set_step(sid, status="pending", error="cancelled", resume_phase=resume_phase)
+        how = f"continues at {resume_phase}" if resume_phase else "rebuilds the step"
+        return self._stop("cancelled", sid, f"stopped by you; `orch resume` {how}")
+
+    def _interrupted(self) -> ExecOutcome | None:
+        """A KeyboardInterrupt reached the public call. Save the running step as cancelled (None: nothing to save)."""
+        if not self.meta.get("steps"):
+            return None
+        self._interrupting = True
+        self._cancel.set()
+        running = next((sid for sid, s in self.meta["steps"].items() if s.get("status") == "running"), None)
+        if running is None:
+            return self._stop("cancelled", None, "stopped by you; `orch resume` continues with the next step")  # type: ignore[arg-type]
+        return self._cancelled(running, resume_point(self._st(running).get("phase")))
+
     # -- meta --
     def _save(self) -> None:
-        write_meta(self.run_dir, self.meta)
-        if self._lock is not None:
-            self._lock.beat()
-        if self.on_update is not None:
-            self.on_update(self.meta)
+        with self._critical():
+            write_meta(self.run_dir, self.meta)
+            if self._lock is not None:
+                self._lock.beat()
+            if self.on_update is not None:
+                self.on_update(self.meta)
 
     def _set_step(self, sid: str, **kw) -> dict:
         s = self.meta["steps"][sid]
@@ -536,11 +600,13 @@ class Executor:
                 return self._stop(st["status"], step.id, f"step {step.id} is {st['status']}")
             if any(steps[d]["status"] != "done" for d in step.depends_on):
                 return self._stop("failed", step.id, f"step {step.id} depends on an unfinished step")
+            if self._cancel.is_set():
+                return self._stop("cancelled", step.id, f"stopped by you before step {step.id}; `orch resume` continues it")
             phase = st.get("resume_phase")
             if phase is None and st["status"] == "running":  # the process died mid-step
                 phase = resume_point(st.get("phase"))
-                if phase == "commit":
-                    self._crash_commit_sid = step.id
+            if phase == "commit":  # the commit may already exist (died, or was stopped, right after `git commit`)
+                self._crash_commit_sid = step.id
             if step.risk_flags and not st["risk_approved"] and phase is None:
                 self._set_step(step.id, status="awaiting_approval", stage="pre_builder", rule=", ".join(step.risk_flags))
                 return self._stop("awaiting_approval", step.id, f"step {step.id} has risk flags: {', '.join(step.risk_flags)}")
@@ -567,7 +633,10 @@ class Executor:
         def with_env(entry: Entry) -> AgentRequest:
             return build(entry).model_copy(update={"env_passthrough": list(self.repo.env_passthrough)})
 
-        routed = call_role(role_name, with_env, self.get_adapter, self.cfg)
+        if self._cancel.is_set():  # nothing is called, nothing is logged
+            self.last_entry, self.last_called = None, False
+            return failure(self.cfg.roles[role_name][0].agent, ErrorKind.CANCELLED, "cancelled before the call")
+        routed = call_role(role_name, with_env, self.get_adapter, self.cfg, cancel=self._cancel)
         self._resume_after = routed.resume_after if routed.paused else None
         if routed.paused and routed.rate_limited is None:  # nothing was called: all entries already cooling
             self.last_entry = None
@@ -577,6 +646,10 @@ class Executor:
         assert result is not None
         self.last_called = True
         self.last_entry = routed.entry
+        with self._critical():  # tokens and counters move together
+            return self._record_call(sid, role_name, routed, result)
+
+    def _record_call(self, sid: str, role_name: str, routed, result: AgentResult) -> AgentResult:
         st = self._st(sid)
         sdir = self.run_dir / "steps" / sid
         if role_name == "builder" and not (sdir / "builder_raw.json").exists():
@@ -605,6 +678,8 @@ class Executor:
         return result
 
     def _agent_stop(self, sid: str, role_name: str, result: AgentResult, resume_phase: str | None) -> ExecOutcome:
+        if result.error_kind == ErrorKind.CANCELLED:
+            return self._cancelled(sid, resume_phase)
         if result.error_kind == ErrorKind.RATE_LIMITED:
             self._set_step(sid, status="pending", error="rate limited", resume_phase=resume_phase)
             when = ""
@@ -704,6 +779,8 @@ class Executor:
         sdir = self.run_dir / "steps" / sid
         while True:
             st = self._st(sid)
+            if self._cancel.is_set():  # a repair that has not started edited nothing, so it can be repeated
+                return self._cancelled(sid, "need_repair" if phase == "repair" else phase)
             self._set_step(sid, phase=phase)
             if phase == "checks":
                 if (stop := self._post_checks(step)) is not None:
@@ -711,6 +788,8 @@ class Executor:
                 phase = "tests"
             elif phase == "tests":
                 state = self._tests(sid, sdir)
+                if state == "cancelled":
+                    return self._cancelled(sid, "tests")
                 if state == "broken":
                     tests = self._st(sid)["tests"] or {}
                     self._set_step(sid, status="failed", error=tests.get("error") or "tests could not run", stage="tests")
@@ -785,13 +864,15 @@ class Executor:
 
     # -- tests --
     def _tests(self, sid: str, sdir: Path) -> str:
-        """'pass' | 'fail' | 'broken'. In repair rounds the quick retest runs first; only the full command gates."""
+        """'pass' | 'fail' | 'broken' | 'cancelled'. In repair rounds the quick retest runs first; only the full command gates."""
         st = self._st(sid)
         in_repair = bool(st["rounds"])
         sfx = f"_r{st['rounds_total']}" if in_repair else ""
         cur = st["rounds"][-1] if in_repair else None
         if in_repair and self.retest_command and self.retest_command != self.test_command:
             ok, info = self._run_cmd(self.retest_command, sdir / f"retest{sfx}.txt")
+            if info.get("cancelled"):
+                return "cancelled"
             if cur is not None:
                 cur["retest"] = info
             self._save()
@@ -801,6 +882,8 @@ class Executor:
                 self._set_step(sid, last_failure=f"retest{sfx}.txt")
                 return "fail"
         ok, info = self._run_cmd(self.test_command, sdir / f"tests{sfx}.txt")
+        if info.get("cancelled"):
+            return "cancelled"
         if cur is not None:
             cur["tests"] = info
         self._set_step(sid, tests=info)
@@ -819,7 +902,11 @@ class Executor:
         except ValueError as e:
             return False, {"exit_code": None, "passed": False, "error": f"bad test_command: {e}", "duration_s": 0,
                            "unrunnable": True}  # fmt: skip
-        out = run_process(argv, cwd=self.wt, env=child_env(passthrough=self.repo.env_passthrough), timeout_s=TEST_TIMEOUT_S)
+        out = run_process(argv, cwd=self.wt, env=child_env(passthrough=self.repo.env_passthrough), timeout_s=TEST_TIMEOUT_S,
+                          cancel=self._cancel)  # fmt: skip
+        if out.cancelled:
+            return False, {"exit_code": None, "passed": False, "error": "cancelled", "duration_s": 0, "unrunnable": False,
+                           "cancelled": True}  # fmt: skip
         text = f"$ {command}\n[exit {out.returncode}]\n{out.stdout}\n--- stderr ---\n{out.stderr}\n"
         if out.timed_out:
             text += "\n[timed out]\n"
@@ -873,7 +960,7 @@ class Executor:
                 return f"{full_prompt(e)}\n\n## Previous review (invalid)\n{bad}\n\n{feedback}", None
 
             second = call(retry_prompt) if first.session_id else None
-            if second is not None and not second.ok and second.error_kind == ErrorKind.RATE_LIMITED:
+            if second is not None and not second.ok and second.error_kind in (ErrorKind.RATE_LIMITED, ErrorKind.CANCELLED):
                 return self._agent_stop(sid, "reviewer", second, "review")
             if second is None or not second.ok:
                 second = call(lambda e: (f"{full_prompt(e)}\n\n## Previous review (invalid)\n{bad}\n\n{feedback}", None))
@@ -930,13 +1017,15 @@ class Executor:
         result: AgentResult | None = None
         if st.get("session_id"):
             result = call(True)
-            if result.ok or result.error_kind == ErrorKind.RATE_LIMITED:
+            if result.ok or result.error_kind in (ErrorKind.RATE_LIMITED, ErrorKind.CANCELLED):
                 mode = "resumed" if (self.last_entry and self.last_entry.label == session_entry) else "fresh"
             else:
                 self.log(f"[{sid}] resume failed ({result.error_kind.value}); using a fresh call")
                 result, mode, resume_failed = None, "fresh", True
         if result is None:
             result = call(False)
+        if result.error_kind == ErrorKind.CANCELLED:  # no round is counted; a killed repair left partial edits: rebuild
+            return self._cancelled(sid, None)
         report = _parse_report(result) if result.ok else None
         if not result.ok:
             if result.error_kind == ErrorKind.RATE_LIMITED:
@@ -984,6 +1073,11 @@ class Executor:
     def _commit(self, step: Step, sdir: Path) -> ExecOutcome | None:
         sid = step.id
         st = self._st(sid)
+        with self._critical():
+            return self._commit_locked(step, sdir, st)
+
+    def _commit_locked(self, step: Step, sdir: Path, st: dict) -> ExecOutcome | None:
+        sid = step.id
         sha = None
         if self._crash_commit_sid == sid and st.get("base_sha"):  # crashed after `git commit`, before meta was saved
             sha = workspace.step_commit_at_head(self.wt, st["base_sha"], sid, self._branch)
