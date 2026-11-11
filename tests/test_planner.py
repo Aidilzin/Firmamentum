@@ -32,6 +32,7 @@ def test_first_try_good(tmp_path):
     assert req.model == "opus" and req.cwd == tmp_path
     assert req.json_schema["title"] == "Plan"
     assert req.extra_args[req.extra_args.index("--tools") + 1] == "Read,Grep,Glob"
+    assert "--restricted" in req.extra_args and "--strict-mcp-config" in req.extra_args
     assert req.extra_args[req.extra_args.index("--permission-prompts") + 1] == "none"
     # role instructions go by flag for claude, not into the prompt
     i = req.extra_args.index("--append-system-prompt")
@@ -107,7 +108,7 @@ def test_scout_runs_first_on_agy_and_feeds_planner(tmp_path):
     )
     assert out.plan and out.scout.text == "Repo is a python CLI."
     scout_req = fakes["agy"].requests[0]
-    assert scout_req.extra_args == ["--mode", "plan"] and scout_req.json_schema is None
+    assert scout_req.extra_args == ["--mode", "plan", "--sandbox"] and scout_req.json_schema is None
     assert "Repo is a python CLI." in fakes["claude"].requests[0].prompt
     assert out.total_tokens == 150
 
@@ -122,7 +123,7 @@ def test_planner_on_agy_gets_instructions_inline_and_plan_mode(tmp_path):
     cfg = CFG.model_copy(update={"roles": {**CFG.roles, "planner": [Entry(agent="agy", model=None)]}})
     out, fakes = run(tmp_path, {"agy": [result(good_plan(), agent="agy")]}, cfg=cfg)
     req = fakes["agy"].requests[0]
-    assert out.plan and req.extra_args == ["--mode", "plan"]
+    assert out.plan and req.extra_args == ["--mode", "plan", "--sandbox"]
     assert "Planner (Laplace)" in req.prompt
 
 

@@ -85,17 +85,18 @@ def test_review_schema_file_matches_model():
 
 def test_reviewer_and_repair_permissions_are_exact(tmp_path):
     a, inline = reviewer_args("claude", "ROLE", tmp_path)
-    assert inline is None
+    assert inline is None and "--restricted" in a and "--strict-mcp-config" in a
     assert a[a.index("--tools") + 1] == "Read,Grep,Glob" and a[a.index("--permission-prompts") + 1] == "none"
     assert a[a.index("--add-dir") + 1] == str(tmp_path) and a[a.index("--append-system-prompt") + 1] == "ROLE"
     assert "--allowedTools" not in a and "Edit" not in ",".join(a) and "Bash" not in ",".join(a)
     a, inline = reviewer_args("agy", "ROLE", tmp_path)
-    assert a[:2] == ["--mode", "plan"] and inline == "ROLE" and "--append-system-prompt" not in a
+    assert a[:3] == ["--mode", "plan", "--sandbox"] and inline == "ROLE" and "--append-system-prompt" not in a
 
     r = repair_args("uv run pytest -q", "uv run pytest -q --lf", "ROLE", tmp_path / "round1")
     allowed = r[r.index("--allowedTools") + 1].split(",")
     assert allowed[5:] == ["Bash(uv run pytest -q)", "Bash(uv run pytest -q --lf)"]
     assert r[r.index("--tools") + 1] == "Read,Grep,Glob,Edit,Write,Bash"
+    assert "--restricted" in r and "--strict-mcp-config" in r
     assert "Bash(git *)" in r[r.index("--disallowedTools") + 1]
     assert r[r.index("--add-dir") + 1] == str(tmp_path / "round1") and r.count("--add-dir") == 1
 

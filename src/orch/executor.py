@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from . import workspace
 from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind, failure
+from .adapters.claude_code import CONFINE_ARGS
 from .adapters.process import child_env, run_process
 from . import review as review_mod
 from .build import BuildReport, load_schema_file
@@ -82,12 +83,13 @@ def reviewer_args(agent: str, role_text: str, step_dir: Path) -> tuple[list[str]
     """(extra CLI args, role text to put inline in the prompt). Read-only either way."""
     if agent == "claude":
         return [
+            *CONFINE_ARGS,
             "--permission-prompts", "none",
             "--tools", "Read,Grep,Glob",
             "--add-dir", str(step_dir),
             "--append-system-prompt", role_text,
         ], None  # fmt: skip
-    return ["--mode", "plan", "--add-dir", str(step_dir)], role_text
+    return ["--mode", "plan", "--sandbox", "--add-dir", str(step_dir)], role_text
 
 
 def builder_args(test_command: str, role_text: str, extra_commands: tuple[str, ...] = ()) -> list[str]:
@@ -96,6 +98,7 @@ def builder_args(test_command: str, role_text: str, extra_commands: tuple[str, .
     for c in dict.fromkeys([test_command, *extra_commands]):
         allowed.append(f"Bash({c})")  # exact match only: a trailing `*` lets pytest flags (--basetemp, -p) through
     return [
+        *CONFINE_ARGS,
         "--permission-prompts", "none",
         "--tools", BUILDER_TOOLS,
         "--allowedTools", ",".join(allowed),

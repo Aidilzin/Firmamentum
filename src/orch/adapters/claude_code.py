@@ -12,6 +12,10 @@ from .process import ProcessOutput, child_env, run_process
 # Removed so claude always uses the Pro login instead of billing an API key.
 SCRUBBED_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL")
 
+# On every worker call (docs/probe-results.md): ignore user/project/local settings and hooks, skip all MCP
+# servers, and confine the file tools to the working directories (--add-dir included).
+CONFINE_ARGS = ["--restricted", "--strict-mcp-config"]
+
 
 @dataclass
 class CommandSpec:

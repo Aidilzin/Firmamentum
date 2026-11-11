@@ -12,6 +12,7 @@ from typing import Callable
 from pydantic import ValidationError
 
 from .adapters.base import AgentAdapter, AgentRequest, AgentResult
+from .adapters.claude_code import CONFINE_ARGS
 from .router import Routed, call_role
 from .config import Config, Entry, ResolvedRepo
 from .plan import Plan, load_schema_file
@@ -63,11 +64,12 @@ def read_only_args(agent: str) -> list[str]:
     """Flags that keep a worker read-only (see docs/phase2-notes.md).
 
     claude: restrict the built-in toolset to read tools, and auto-deny anything that would prompt.
-    agy has no tool allow-list; `--mode plan` is its read-only mode.
+    agy has no tool allow-list; `--mode plan --sandbox` is its read-only mode (plan mode alone blocks commands;
+    file writes were not exercised, so the sandbox is added as a second layer).
     """
     if agent == "claude":
-        return ["--tools", READ_ONLY_TOOLS, "--permission-prompts", "none"]
-    return ["--mode", "plan"]
+        return [*CONFINE_ARGS, "--tools", READ_ONLY_TOOLS, "--permission-prompts", "none"]
+    return ["--mode", "plan", "--sandbox"]
 
 
 def extract_json(text: str) -> object:

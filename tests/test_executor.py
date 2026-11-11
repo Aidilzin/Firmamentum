@@ -126,6 +126,7 @@ def test_builder_permissions_are_exact(env):
     a = builder_args("uv run pytest -q", "ROLE")  # the realistic config command, no process spawned
     assert a[a.index("--append-system-prompt") + 1] == "ROLE"
     assert a[a.index("--permission-prompts") + 1] == "none"
+    assert "--restricted" in a and "--strict-mcp-config" in a
     assert a[a.index("--tools") + 1] == "Read,Grep,Glob,Edit,Write,Bash"
     allowed = a[a.index("--allowedTools") + 1].split(",")
     assert allowed[:5] == ["Read", "Grep", "Glob", "Edit", "Write"]
