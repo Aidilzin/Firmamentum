@@ -91,7 +91,7 @@ def render_home(d: HomeData, theme: Theme) -> list[Text]:
         row("cooldowns", "none")
     if d.latest:
         name, run = d.latest
-        row("latest", f"{run.run_id[:46]}  {run.status}" + (f"  [{name}]" if name else ""))
+        row("latest", f"{run.run_id[:46]}  {run.shown_status}" + (f"  [{name}]" if name else ""))
     else:
         row("latest", "no runs yet")
     repo = d.example_repo or "<repo>"

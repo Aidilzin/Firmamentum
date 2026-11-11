@@ -9,6 +9,7 @@ meta.json is rewritten after every transition so a crash or a usage limit can be
 
 from __future__ import annotations
 
+import functools
 import json
 import shlex
 import shutil
@@ -25,6 +26,7 @@ from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind, f
 from .adapters.claude_code import CONFINE_ARGS
 from .adapters.process import child_env, run_process
 from . import review as review_mod
+from . import runlock
 from .build import BuildReport, load_schema_file
 from .checks import classify, is_self_hosting_repo, outside_plan
 from .config import Config, Entry, ResolvedRepo
@@ -282,6 +284,24 @@ def check_hidden_tests(hidden: Path, repo: Path, worktree: Path | None = None) -
     return names
 
 
+def _exclusive(fn):
+    """Hold the run's lock for the whole public call, so two executors never work on one run."""
+
+    @functools.wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        try:
+            self._lock = runlock.acquire(self.run_dir)
+        except runlock.RunLocked as e:
+            raise ExecError(f"run {self.run_dir.name} is being executed by {e.info.describe()}; stop it first") from None
+        try:
+            return fn(self, *args, **kwargs)
+        finally:
+            self._lock.release()
+            self._lock = None
+
+    return wrapper
+
+
 # ---------- executor ----------
 
 
@@ -306,11 +326,14 @@ class Executor:
         self.wt: Path = Path()
         self.last_entry: Entry | None = None  # entry that served the most recent agent call
         self._resume_after: datetime | None = None
+        self._lock: runlock.RunLock | None = None
         self.last_called = False  # False when the last _agent() found every entry cooling and called nothing
 
     # -- meta --
     def _save(self) -> None:
         write_meta(self.run_dir, self.meta)
+        if self._lock is not None:
+            self._lock.beat()
         if self.on_update is not None:
             self.on_update(self.meta)
 
@@ -378,6 +401,7 @@ class Executor:
         if need_worktree and not self.wt.is_dir():
             raise ExecError(f"the worktree {self.wt} is gone (orch clean?); it cannot be continued")
 
+    @_exclusive
     def start(self) -> ExecOutcome:
         self._load()
         assert self.plan is not None
@@ -413,6 +437,7 @@ class Executor:
         self._save()
         return self._loop()
 
+    @_exclusive
     def resume(self) -> ExecOutcome:
         self._load_started()
         if self.meta.get("status") == "done":
@@ -437,6 +462,7 @@ class Executor:
             raise ExecError(f"{len(found)} steps are {what}; name one with --step" if found else f"no step is {what}")
         return found[0]
 
+    @_exclusive
     def approve(self, step_id: str | None = None, retry: bool = False) -> ExecOutcome:
         self._load_started()
         sid = self._pick(step_id, ("awaiting_approval",), "awaiting approval")
@@ -463,12 +489,14 @@ class Executor:
         self._save()
         return self._loop()
 
+    @_exclusive
     def reject(self, step_id: str) -> ExecOutcome:
         self._load_started(need_worktree=False)
         sid = self._pick(step_id, ("awaiting_approval", "needs_input", "failed", "pending", "running"), "open")
         self._set_step(sid, status="rejected", resume_phase=None)
         return self._stop("rejected", sid, f"step {sid} rejected by you; the run is stopped")
 
+    @_exclusive
     def answer(self, step_id: str | None, text: str) -> ExecOutcome:
         self._load_started()
         sid = self._pick(step_id, ("needs_input",), "waiting for an answer")

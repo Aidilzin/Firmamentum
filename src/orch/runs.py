@@ -5,10 +5,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import runlock
 from .plan import Plan
 from .planner import PlannerOutcome
 
@@ -116,13 +119,33 @@ class RunInfo:
     created: str
     total_tokens: int
     path: Path
+    stale: bool = False  # status is `executing` but nobody holds the run lock: the process died
+
+    @property
+    def shown_status(self) -> str:
+        return f"{self.status} (stale)" if self.stale else self.status
+
+
+FILE_RETRIES = 10  # Windows: os.replace / open fail with PermissionError while another handle is open
+FILE_RETRY_S = 0.1
 
 
 def _read_meta(d: Path) -> dict | None:
-    try:
-        return json.loads((d / "meta.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    for attempt in range(FILE_RETRIES):
+        try:
+            return json.loads((d / "meta.json").read_text(encoding="utf-8"))
+        except PermissionError:
+            if attempt == FILE_RETRIES - 1:
+                return None
+            time.sleep(FILE_RETRY_S)
+        except (OSError, json.JSONDecodeError):
+            return None
+    return None
+
+
+def is_stale(run_dir: Path, meta: dict) -> bool:
+    """`executing` on disk, but no process holds the run lock: the executor died mid-run."""
+    return meta.get("status") == "executing" and runlock.holder(run_dir) is None
 
 
 def load_meta(run_dir: Path) -> dict:
@@ -133,10 +156,21 @@ def load_meta(run_dir: Path) -> dict:
 
 
 def write_meta(run_dir: Path, meta: dict) -> None:
-    """Atomic write (tmp + replace) so a crash never leaves a half-written meta.json."""
-    tmp = run_dir / "meta.json.tmp"
+    """Atomic write (unique tmp + replace) so a crash never leaves a half-written meta.json.
+    On Windows os.replace raises PermissionError while a reader has meta.json open, so it is retried briefly."""
+    tmp = run_dir / f"meta.json.{os.getpid()}.{threading.get_ident()}.tmp"
     _dump(tmp, meta)
-    os.replace(tmp, run_dir / "meta.json")
+    try:
+        for attempt in range(FILE_RETRIES):
+            try:
+                os.replace(tmp, run_dir / "meta.json")
+                return
+            except PermissionError:
+                if attempt == FILE_RETRIES - 1:
+                    raise
+                time.sleep(FILE_RETRY_S)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def list_runs(repo: Path) -> list[RunInfo]:
@@ -148,7 +182,8 @@ def list_runs(repo: Path) -> list[RunInfo]:
     for d in sorted((p for p in root.iterdir() if p.is_dir()), reverse=True):
         m = _read_meta(d) or {}
         out.append(
-            RunInfo(d.name, m.get("status", "incomplete"), m.get("created", ""), run_tokens(m)[1], d)
+            RunInfo(d.name, m.get("status", "incomplete"), m.get("created", ""), run_tokens(m)[1], d,
+                    stale=is_stale(d, m))  # fmt: skip
         )
     return out
 

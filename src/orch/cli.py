@@ -30,7 +30,7 @@ from .view import build_run_view, duration, fmt_elapsed
 from .merge import MergeError, merge_run
 from .plan import format_plan
 from .planner import make_plan
-from .runs import RunNotFound, create_run, find_run, list_runs, load_meta, load_plan, run_tokens, save_outcome, write_meta
+from .runs import RunNotFound, create_run, find_run, is_stale, list_runs, load_meta, load_plan, run_tokens, save_outcome, write_meta
 
 app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.")
 
@@ -241,7 +241,7 @@ def runs(repo: Optional[str] = typer.Option(None, "--repo", help="Configured rep
     if not items:
         typer.echo("(no runs)")
     for r in items:
-        typer.echo(f"{r.run_id:<60} {r.status:<12} {r.created[:19].replace('T', ' ')}")
+        typer.echo(f"{r.run_id:<60} {r.shown_status:<12} {r.created[:19].replace('T', ' ')}")
 
 
 @app.command()
@@ -316,6 +316,8 @@ def next_commands(run_dir: Path, repo_name: str | None = None) -> list[str]:
                 out.append(f"{_cmd(rid, repo_name, f'diff {rid} --step {sid}')}   # the uncommitted change of this step")
     if meta.get("status") == "paused" and not out:
         out.append(_cmd(rid, repo_name, f"resume {rid}"))
+    if is_stale(run_dir, meta):
+        out.append(f"{_cmd(rid, repo_name, f'resume {rid}')}   # the run died mid-step")
     if meta.get("status") == "done" and not meta.get("merged_sha"):
         out.append(f"{_cmd(rid, repo_name, f'diff {rid}')}   # review, then: {_cmd(rid, repo_name, f'merge {rid}')}")
     return out
@@ -324,7 +326,8 @@ def next_commands(run_dir: Path, repo_name: str | None = None) -> list[str]:
 def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
     meta = load_meta(run_dir)
     total_time = duration(meta.get("started_at"), meta.get("ended_at"))
-    lines = [f"Run: {run_dir.name}  status: {meta.get('status')}" + (f"  time: {fmt_elapsed(total_time)}" if total_time is not None else "")]
+    shown = f"{meta.get('status')} (stale)" if is_stale(run_dir, meta) else meta.get("status")
+    lines = [f"Run: {run_dir.name}  status: {shown}" + (f"  time: {fmt_elapsed(total_time)}" if total_time is not None else "")]
     if meta.get("models"):
         routed = {r["role"]: r for r in meta.get("routing") or []}
         lines.append("Planning models: " + ", ".join(
