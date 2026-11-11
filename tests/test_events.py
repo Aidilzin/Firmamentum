@@ -478,3 +478,143 @@ def test_events_module_imports_no_executor_view_or_ui():
         elif isinstance(n, ast.Import):
             mods.update(a.name for a in n.names)
     assert not {m for m in mods if "executor" in m or "view" in m or "ui" in m.split(".")[-1:]}
+
+
+# ---------- P4b: views are built from snapshots ----------
+
+from io import StringIO  # noqa: E402
+
+from rich.console import Console  # noqa: E402
+
+from orch import cli  # noqa: E402
+from orch.executor import ExecOutcome  # noqa: E402
+from orch.ui import LiveView, PlainView, render_plain  # noqa: E402
+from orch.view import build_run_view  # noqa: E402
+
+
+def live_view():
+    return LiveView({"builder": "claude:sonnet"}, Console(file=StringIO(), width=120, force_terminal=False))
+
+
+def test_live_view_built_from_a_real_runs_events_matches_the_saved_meta(env):
+    repo, setup, executor = env
+    run_dir, rr = setup()
+    ex, _ = executor(run_dir, rr, [edit({"src/s1.py": "a\n"}), edit({"src/s2.py": "b\n"})])
+    got = attach(ex)
+    assert ex.start().status == "done"
+    view = live_view()
+    for e in got:
+        view.on_event(e)
+    saved = load_meta(run_dir)
+    assert got[-1].meta == freeze(saved)
+    assert view.meta is got[-1].meta  # kept as is: frozen, never copied back into a dict
+    entries = {"builder": "claude:sonnet"}
+    assert render_plain(build_run_view(view.meta, entries)) == render_plain(build_run_view(saved, entries))
+    assert build_run_view(view.meta, entries).tokens_total == build_run_view(saved, entries).tokens_total == 200
+
+
+def test_live_view_tracks_step_times_from_events(env):
+    repo, setup, executor = env
+    run_dir, rr = one_step(setup)
+    ex, _ = executor(run_dir, rr, [edit({"src/s1.py": "a\n"})])
+    got = attach(ex)
+    ex.start()
+    ticks = iter(range(0, 10_000, 3))
+    view = LiveView({}, Console(file=StringIO(), width=100, force_terminal=False), clock=lambda: next(ticks))
+    for e in got:
+        view.on_event(e)
+    _, times = view._state
+    start, end = times["s1"]
+    assert end is not None and end > start
+
+
+def test_on_update_shim_keeps_no_reference_to_the_callers_dict():
+    meta = {"run_id": "r", "status": "executing", "steps": {"s1": {"title": "T", "status": "running", "phase": "build"}}}
+    view = live_view()
+    view.on_update(meta)
+    before = render_plain(build_run_view(view.meta))
+    meta["steps"]["s2"] = {"title": "new", "status": "pending"}  # the executor keeps changing its dict
+    meta["steps"]["s1"]["status"] = "done"
+    assert render_plain(build_run_view(view.meta)) == before
+    assert view.meta is not meta and "s2" not in view.meta["steps"]
+    with pytest.raises(TypeError):
+        view.meta["status"] = "x"
+
+
+def test_rendering_while_events_arrive_does_not_race(env):
+    repo, setup, executor = env
+    run_dir, rr = setup()
+    ex, _ = executor(run_dir, rr, [edit({"src/s1.py": "a\n"}), edit({"src/s2.py": "b\n"})])
+    got = attach(ex)
+    ex.start()
+    view = live_view()
+    errors, stop = [], threading.Event()
+
+    def refresh_thread():  # what rich's refresh thread does
+        while not stop.is_set():
+            try:
+                view._render()
+            except Exception as e:  # noqa: BLE001
+                errors.append(e)
+                return
+
+    t = threading.Thread(target=refresh_thread)
+    t.start()
+    try:
+        for _ in range(300):
+            for e in got:
+                view.on_event(e)
+    finally:
+        stop.set()
+        t.join(10)
+    assert errors == []
+
+
+def test_live_view_draws_the_final_frame_from_events():
+    buf = StringIO()
+    view = LiveView({"builder": "claude:sonnet"}, Console(file=buf, width=120, force_terminal=False))
+    snap = freeze({"run_id": "r", "status": "executing", "exec_tokens": 77, "role_tokens": {"builder": 77},
+                   "steps": {"s1": {"title": "Slugify", "status": "running", "phase": "build", "tokens": 77,
+                                    "roles_tokens": {"builder": 77}}}})  # fmt: skip
+    with view:
+        view.on_event(RunStarted(seq=1, run_id="r", meta=snap, action="start"))
+    text = buf.getvalue()
+    assert "Maxwell" in text and "building s1" in text and "total 77 tokens" in text
+
+
+def test_plain_view_ignores_events_and_still_prints_log_lines():
+    out = []
+    v = PlainView(out.append)
+    v.on_event(RunStarted(seq=1, run_id="r", meta=freeze({}), action="start"))
+    v.log("[s1] reviewing")
+    assert len(out) == 1 and "reviewing" in out[0]
+
+
+def test_drive_hands_a_live_view_on_event_and_a_plain_view_nothing(monkeypatch, tmp_path):
+    seen = {}
+
+    class StubExecutor:
+        def __init__(self, *a, **kw):
+            seen.update(kw)
+
+        def start(self):
+            return ExecOutcome("done", None, "ok")
+
+    monkeypatch.setattr(cli, "Executor", StubExecutor)
+    monkeypatch.setattr(cli, "_install_sigint", lambda ex: None)
+    monkeypatch.setattr(cli, "_emit_status", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "next_commands", lambda *a, **k: [])
+    monkeypatch.setattr(cli, "load_meta", lambda d: {})
+
+    class Cfg:
+        roles = {}
+
+    class Target:
+        name = "demo"
+
+    for plain, expect_events in ((True, False), (False, True)):
+        seen.clear()
+        monkeypatch.setattr("orch.ui.is_interactive", lambda: True)
+        with pytest.raises(Exception):  # typer.Exit
+            cli._drive(Target(), tmp_path, Cfg(), "start", plain=plain)
+        assert "on_update" not in seen and (seen["on_event"] is not None) == expect_events

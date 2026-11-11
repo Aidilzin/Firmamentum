@@ -1,4 +1,4 @@
-"""The view model: a pure data structure built from meta.json. No rich, no printing, no executor imports.
+"""The view model: a pure data structure built from meta.json (a plain dict, or a frozen event snapshot). No rich, no printing, no executor imports.
 
 Renderers (ui.py: rich inline and plain) consume a RunView only. A future full-screen front end would be a third
 renderer reading the same structure.
@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from .events import Meta
 from .runs import run_tokens
 from .theme import demon_label
 
@@ -165,7 +166,7 @@ def _step_view(sid: str, st: dict, first_entries: dict[str, str], live_elapsed: 
     )  # fmt: skip
 
 
-def stop_info(status: str, step_id: str | None, message: str, meta: dict, next_cmds: list[str]) -> StopInfo:
+def stop_info(status: str, step_id: str | None, message: str, meta: Meta, next_cmds: list[str]) -> StopInfo:
     """What happened, why, and the exact next command."""
     st = (meta.get("steps") or {}).get(step_id or "", {}) if step_id else {}
     what = f"run {status}" + (f" at step {step_id}" if step_id else "") + (f": {message}" if message else "")
@@ -189,7 +190,7 @@ def stop_info(status: str, step_id: str | None, message: str, meta: dict, next_c
     return StopInfo(kind, what, "; ".join(why) if why else "-", list(next_cmds))
 
 
-def _demon_lines(meta: dict, steps: list[StepView], models: dict[str, str], by_role: dict[str, int],
+def _demon_lines(meta: Meta, steps: list[StepView], models: dict[str, str], by_role: dict[str, int],
                  raw_steps: dict) -> list[DemonLine]:  # fmt: skip
     lines: list[DemonLine] = []
     n_steps = len(raw_steps)
@@ -223,7 +224,7 @@ def _demon_lines(meta: dict, steps: list[StepView], models: dict[str, str], by_r
 
 
 def build_run_view(
-    meta: dict,
+    meta: Meta,
     first_entries: dict[str, str] | None = None,
     elapsed: dict[str, float | None] | None = None,
     elapsed_total: float | None = None,

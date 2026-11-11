@@ -455,7 +455,7 @@ def _restore_sigint(previous) -> None:
 def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None, **kw) -> None:
     view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()}, current_theme())
     ex = Executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
-                  on_update=view.on_update, hidden_tests=hidden_tests)  # fmt: skip
+                  on_event=view.on_event if view.live else None, hidden_tests=hidden_tests)  # fmt: skip
     previous = _install_sigint(ex)
     try:
         with view:

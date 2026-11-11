@@ -1,7 +1,8 @@
 """Display only: renderers for RunView (rich inline and plain), the live view for exec/run/resume, the stop panel.
 
-Nothing here changes what the executor does. The executor calls `log(msg)` and `on_update(meta)`; the view
-builds a RunView (view.py) from the meta dict it is handed, and a renderer draws it.
+Nothing here changes what the executor does. The executor calls `log(msg)` (plain view) and `on_event(event)`; the
+live view builds a RunView (view.py) from the frozen snapshot each event carries, never from the executor's own dict,
+and a renderer draws it.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.text import Text
 
+from .events import Meta, RunEvent, freeze
 from .runs import run_tokens
 from .theme import Theme, current_theme, demon_label
 from .view import (  # noqa: F401  (PHASE_ROLE / fmt_elapsed re-exported for older imports)
@@ -186,6 +188,9 @@ class PlainView:
     def on_update(self, meta: dict) -> None:
         pass
 
+    def on_event(self, ev: RunEvent) -> None:
+        pass
+
     def __enter__(self) -> PlainView:
         return self
 
@@ -202,7 +207,10 @@ class PlainView:
 
 
 class LiveView(PlainView):
-    """rich live constellation; log lines are printed above it."""
+    """rich live constellation; log lines are printed above it.
+
+    State is ONE immutable pair `(frozen snapshot, step times)`, replaced by a single assignment. rich's refresh thread
+    builds the RunView from whatever pair it reads, so no lock is needed and no dict is shared with the executor."""
 
     live = True
 
@@ -214,39 +222,48 @@ class LiveView(PlainView):
         self.first_entries = first_entries
         self.clock = clock
         self.t0 = clock()
-        self.meta: dict = {}
-        self._times: dict[str, list[float | None]] = {}
-        self._live = Live(self._render(), console=self.console, refresh_per_second=4, transient=False)
+        self._state: tuple[Meta, dict[str, tuple[float, float | None]]] = (freeze({}), {})
+        self._live = Live(get_renderable=self._render, console=self.console, refresh_per_second=4, transient=False)
+
+    @property
+    def meta(self) -> Meta:
+        """The latest snapshot (read-only)."""
+        return self._state[0]
 
     def echo(self, msg: str) -> None:  # type: ignore[override]
         self.console.print(Text(msg))
 
-    def _elapsed(self) -> dict[str, float | None]:
-        now = self.clock()
-        return {sid: ((t[1] if t[1] is not None else now) - t[0]) for sid, t in self._times.items()}  # type: ignore[operator]
-
     def _render(self) -> Group:
-        view = build_run_view(self.meta, self.first_entries, self._elapsed(), elapsed_total=self.clock() - self.t0)
-        return render_rich(view, self.theme)
+        snap, times = self._state
+        now = self.clock()
+        elapsed = {sid: ((t[1] if t[1] is not None else now) - t[0]) for sid, t in times.items()}
+        return render_rich(build_run_view(snap, self.first_entries, elapsed, elapsed_total=now - self.t0), self.theme)
+
+    def _apply(self, snap: Meta) -> None:
+        _, old = self._state
+        now = self.clock()
+        times = dict(old)  # copy-on-write: a reader never sees a dict being changed
+        for sid, st in (snap.get("steps") or {}).items():
+            t = times.get(sid)
+            if st.get("status") == "running" and t is None:
+                times[sid] = (now, None)
+            elif st.get("status") != "running" and t is not None and t[1] is None:
+                times[sid] = (t[0], now)
+        self._state = (snap, times)
+
+    def on_event(self, ev: RunEvent) -> None:
+        self._apply(ev.meta)  # already frozen; the refresh thread does the drawing
 
     def on_update(self, meta: dict) -> None:
-        self.meta = meta
-        now = self.clock()
-        for sid, st in (meta.get("steps") or {}).items():
-            t = self._times.get(sid)
-            if st.get("status") == "running" and t is None:
-                self._times[sid] = [now, None]
-            elif st.get("status") != "running" and t is not None and t[1] is None:
-                t[1] = now
-        self._live.update(self._render())
+        """Old entry point: takes its own frozen copy, so the caller's dict is never kept or iterated."""
+        self._apply(freeze(meta))
 
     def __enter__(self) -> LiveView:
         self._live.start()
         return self
 
     def __exit__(self, *exc) -> None:
-        self._live.update(self._render())
-        self._live.stop()
+        self._live.stop()  # stop() draws the final frame
 
     def show_stop(self, status: str, step_id: str | None, message: str, meta: dict, next_cmds: list[str]) -> None:
         if status == "done":
