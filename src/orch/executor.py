@@ -21,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from pydantic import ValidationError
 
@@ -34,6 +34,10 @@ from . import runlock
 from .build import BuildReport, load_schema_file
 from .checks import classify, is_self_hosting_repo, outside_plan
 from .config import Config, Entry, ResolvedRepo
+from .events import (
+    AgentCalled, AgentFinished, PhaseChanged, RunCrashed, RunEvent, RunFinished, RunStarted, StepFinished, StepStarted,
+    Stopped, freeze,
+)
 from .plan import Plan, Step
 from .planner import extract_json
 from .router import call_role
@@ -312,14 +316,20 @@ def _exclusive(fn):
         except runlock.RunLocked as e:
             raise ExecError(f"run {self.run_dir.name} is being executed by {e.info.describe()}; stop it first") from None
         self._thread_id = threading.get_ident()
+        self._action, self._run_started = fn.__name__, False
         try:
             try:
-                return fn(self, *args, **kwargs)
+                outcome = fn(self, *args, **kwargs)
             except KeyboardInterrupt:  # Ctrl-C (second press) or a raw interrupt: leave a consistent, resumable step
                 outcome = self._interrupted()
                 if outcome is None:
                     raise
-                return outcome
+            except BaseException as e:
+                if self._run_started:  # got past its preconditions: the stream must still end with a terminal event
+                    self._emit_crashed(e)
+                raise
+            self._emit_terminal(outcome)
+            return outcome
         finally:
             self._lock.release()
             self._lock = None
@@ -341,9 +351,18 @@ class Executor:
         on_update: Callable[[dict], None] | None = None,
         hidden_tests: Path | None = None,
         cancel: threading.Event | None = None,
+        on_event: Callable[[RunEvent], None] | None = None,
     ):
         self.repo, self.run_dir, self.cfg, self.get_adapter, self.log = repo, run_dir, cfg, get_adapter, log
-        self.on_update = on_update  # display only: called with the meta dict after every save
+        # Deprecated: hands out the live, mutable meta dict (audit D3). Use `on_event`; removed after the shell lands.
+        self.on_update = on_update
+        # Typed events with frozen snapshots. Called on the executor thread and must not block: a UI thread should pass
+        # `EventBuffer.emit`. A consumer that raises never fails the run (one warning is logged).
+        self.on_event = on_event
+        self._seq = 0
+        self._action = ""
+        self._run_started = False
+        self._consumer_warned = False
         self.hidden_tests = Path(hidden_tests).resolve() if hidden_tests else None
         self.meta: dict = {}
         self.plan: Plan | None = None
@@ -416,9 +435,35 @@ class Executor:
             if self.on_update is not None:
                 self.on_update(self.meta)
 
+    def _emit(self, cls: type[RunEvent], _meta: Mapping | None = None, **kw) -> None:
+        """Build an event from the current meta (frozen) and hand it to `on_event`. Nothing is built without a consumer."""
+        if self.on_event is None:
+            return
+        try:
+            self._seq += 1
+            self.on_event(cls(seq=self._seq, run_id=self.run_dir.name, meta=freeze(self.meta if _meta is None else _meta), **kw))
+        except Exception as e:  # a UI bug must not fail a run, but it must not be silent either
+            if not self._consumer_warned:
+                self._consumer_warned = True
+                self.log(f"event consumer failed: {e}")
+
+    def _emit_terminal(self, o: ExecOutcome) -> None:
+        if o.status == "done":
+            self._emit(RunFinished, message=o.message)
+        else:
+            self._emit(Stopped, outcome=o.status, step_id=o.step_id, message=o.message)
+
+    def _emit_crashed(self, e: BaseException) -> None:
+        try:
+            saved: Mapping | None = load_meta(self.run_dir)  # the last SAVED state, not unsaved in-memory edits
+        except Exception:
+            saved = None
+        self._emit(RunCrashed, _meta=saved, error=f"{type(e).__name__}: {e}")
+
     def _set_step(self, sid: str, **kw) -> dict:
         s = self.meta["steps"][sid]
         prev, new = s.get("status"), kw.get("status")
+        prev_phase = s.get("phase")
         if new is not None and new != prev:  # timestamps are data only: the latest running segment of the step
             if new == "running":
                 s["started_at"] = _utc_now()
@@ -427,6 +472,10 @@ class Executor:
                 s["ended_at"] = _utc_now()
         s.update(kw)
         self._save()
+        if new == "running":  # also when a crashed step is found `running` and continues: it is a new attempt segment
+            self._emit(StepStarted, step_id=sid, title=s.get("title", ""), phase=s.get("phase"))
+        elif kw.get("phase") is not None and kw["phase"] != prev_phase:
+            self._emit(PhaseChanged, step_id=sid, phase=kw["phase"])
         return s
 
     def _mark_run_start(self) -> None:
@@ -592,6 +641,8 @@ class Executor:
     def _loop(self) -> ExecOutcome:
         assert self.plan is not None
         steps = self.meta["steps"]
+        self._run_started = True  # past the preconditions: from here every exit ends with one terminal event
+        self._emit(RunStarted, action=self._action)
         for step in self.plan.topo_order():
             st = self._st(step.id)
             if st["status"] == "done":
@@ -675,6 +726,11 @@ class Executor:
         by_role = self.meta.setdefault("role_tokens", {})
         by_role[role_name] = by_role.get(role_name, 0) + result.total_tokens
         self._save()
+        # A pause after rate limits made real calls but the router names no entry; the result's agent is the best label.
+        self._emit(AgentCalled, step_id=sid, role=role_name,
+                   entry=routed.entry.label if routed.entry is not None else result.agent, fallback=routed.fallback)  # fmt: skip
+        self._emit(AgentFinished, step_id=sid, role=role_name, tokens=result.total_tokens, ok=result.ok,
+                   error_kind=None if result.ok else result.error_kind.value)  # fmt: skip
         return result
 
     def _agent_stop(self, sid: str, role_name: str, result: AgentResult, resume_phase: str | None) -> ExecOutcome:
@@ -1096,5 +1152,6 @@ class Executor:
                                         on_staged=record_intent)  # fmt: skip
         (sdir / "diff.patch").write_text(workspace.diff(self.wt, f"{sha}^", sha), encoding="utf-8")
         self._set_step(sid, status="done", commit=sha, phase=None, resume_phase=None, repair_ctx=None)
+        self._emit(StepFinished, step_id=sid, commit=sha)
         self.log(f"[{sid}] done {sha[:8]}")
         return None
