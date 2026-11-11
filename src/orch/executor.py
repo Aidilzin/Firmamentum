@@ -56,7 +56,7 @@ RESUMABLE_PHASES = ("checks", "tests", "review", "need_repair", "commit")
 # State of one build attempt. A rebuild clears it (cost counters, answers and risk approval are kept).
 ATTEMPT_FIELDS = (
     "rounds", "rounds_used", "rounds_total", "repair_ctx", "reviews", "last_failure", "session_id", "session_entry",
-    "approved", "tests", "changed_files", "flagged", "flagged_items", "hidden_files", "summary",
+    "approved", "tests", "changed_files", "flagged", "flagged_items", "hidden_files", "summary", "commit_intent",
 )  # fmt: skip
 
 
@@ -1079,13 +1079,21 @@ class Executor:
     def _commit_locked(self, step: Step, sdir: Path, st: dict) -> ExecOutcome | None:
         sid = step.id
         sha = None
-        if self._crash_commit_sid == sid and st.get("base_sha"):  # crashed after `git commit`, before meta was saved
-            sha = workspace.step_commit_at_head(self.wt, st["base_sha"], sid, self._branch)
+        intent = st.get("commit_intent") or {}
+        if self._crash_commit_sid == sid and intent.get("tree") and intent.get("base_sha"):
+            # the process died after `git commit`, before meta was saved: accept HEAD only if it is exactly the commit
+            # orch recorded (parent and tree), never because of its message
+            sha = workspace.step_commit_at_head(self.wt, intent["base_sha"], intent["tree"], self._branch)
         self._crash_commit_sid = None
         if sha is None:
             if (stop := self._check_git_state(sid)) is not None:
                 return stop
-            sha = workspace.commit_step(self.wt, sid, step.title, st.get("changed_files") or [], self._branch)
+
+            def record_intent(tree: str) -> None:  # saved before `git commit` runs
+                self._set_step(sid, commit_intent={"base_sha": st.get("base_sha"), "tree": tree})
+
+            sha = workspace.commit_step(self.wt, sid, step.title, st.get("changed_files") or [], self._branch,
+                                        on_staged=record_intent)  # fmt: skip
         (sdir / "diff.patch").write_text(workspace.diff(self.wt, f"{sha}^", sha), encoding="utf-8")
         self._set_step(sid, status="done", commit=sha, phase=None, resume_phase=None, repair_ctx=None)
         self.log(f"[{sid}] done {sha[:8]}")

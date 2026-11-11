@@ -85,6 +85,8 @@ def test_crash_after_git_commit_before_meta_saved_does_not_fail_the_step(env, mo
     monkeypatch.setattr(workspace, "commit_step", real)
     meta = load_meta(run_dir)
     assert meta["steps"]["s1"]["status"] == "running" and meta["steps"]["s1"]["phase"] == "commit"
+    intent = meta["steps"]["s1"]["commit_intent"]  # stored before git commit ran
+    assert intent["base_sha"] == meta["steps"]["s1"]["base_sha"] and len(intent["tree"]) == 40
     ex2, fb2 = executor(run_dir, rr, [])
     assert ex2.resume().status == "done" and fb2.requests == []
     wt = workspace.Path(load_meta(run_dir)["exec"]["worktree"])
@@ -184,3 +186,29 @@ def test_hidden_record_of_another_step_is_not_cleared_by_a_rebuild(env, tmp_path
     ex2, _ = executor(run_dir, rr, [edit({"src/s2.py": "b\n"})])
     assert ex2.resume().status == "done"
     assert load_meta(run_dir)["exec"]["hidden_tests"] == {"dir": str(tmp_path), "step": "s1", "files": ["tests/test_x.py"]}
+
+
+def test_a_look_alike_commit_with_another_tree_is_rejected(env, monkeypatch):
+    """Recovery trusts the stored tree id and base sha, never the commit message."""
+    repo, setup, executor = env
+    run_dir, rr = one_step(setup)
+    ex, _ = executor(run_dir, rr, [edit({"src/s1.py": "a\n"})])
+
+    def imposter(wt, step_id, title, paths=None, branch=None, on_staged=None):
+        git(wt, "add", "-A", "--", *paths)
+        on_staged(git(wt, "write-tree").strip())  # orch records the tree it intends to commit...
+        (wt / "extra.py").write_text("evil = 1\n", encoding="utf-8")  # ...but a different one lands, same message
+        git(wt, "add", "-A")
+        git(wt, "-c", "user.name=x", "-c", "user.email=x@x", "commit", "-q", "-m", f"orch({step_id}): {title}")
+        raise Boom("died after the commit")
+
+    real = workspace.commit_step
+    monkeypatch.setattr(workspace, "commit_step", imposter)
+    with pytest.raises(Boom):
+        ex.start()
+    monkeypatch.setattr(workspace, "commit_step", real)
+    ex2, fb2 = executor(run_dir, rr, [])
+    out = ex2.resume()
+    st = load_meta(run_dir)["steps"]["s1"]
+    assert out.status == "failed" and "git_state_changed" in out.message
+    assert st["status"] == "failed" and st["commit"] is None and fb2.requests == []

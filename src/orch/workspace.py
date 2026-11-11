@@ -13,6 +13,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 
 class WorkspaceError(RuntimeError):
@@ -164,25 +165,32 @@ def check_head(wt: Path, base_sha: str, branch: str) -> str | None:
     return None
 
 
-def step_commit_at_head(wt: Path, base_sha: str, step_id: str, branch: str | None = None) -> str | None:
-    """HEAD's sha when it is exactly one commit above `base_sha` with orch's own subject `orch(<id>): ...`, else None.
+def step_commit_at_head(wt: Path, base_sha: str, tree: str, branch: str | None = None) -> str | None:
+    """HEAD's sha when it is exactly the commit orch was about to make: its parent is `base_sha` and its tree is `tree`
+    (the tree id orch stored from the staged index before `git commit`). The message is never consulted.
     Used after a crash between `git commit` and saving meta.json, so a finished commit is not seen as an agent's."""
     wt = _guard(wt, branch=branch)
     head = head_sha(wt)
     if head == base_sha:
         return None
     parent = git(wt, "rev-parse", "HEAD^", check=False).stdout.strip()
-    subject = git(wt, "log", "-1", "--format=%s").stdout.strip()
-    return head if parent == base_sha and subject.startswith(f"orch({step_id}):") else None
+    head_tree = git(wt, "rev-parse", "HEAD^{tree}", check=False).stdout.strip()
+    return head if parent == base_sha and head_tree == tree else None
 
 
-def commit_step(wt: Path, step_id: str, title: str, paths: list[str] | None = None, branch: str | None = None) -> str:
-    """Commit as `orch(<id>): <title>`. `paths` limits staging (so test artifacts are not committed)."""
+def commit_step(
+    wt: Path, step_id: str, title: str, paths: list[str] | None = None, branch: str | None = None,
+    on_staged: Callable[[str], None] | None = None,
+) -> str:  # fmt: skip
+    """Commit as `orch(<id>): <title>`. `paths` limits staging (so test artifacts are not committed).
+    `on_staged(tree_id)` is called with `git write-tree` of the staged index just before `git commit`."""
     wt = _guard(wt, branch=branch)
     if paths is None:
         git(wt, "add", "-A")
     elif paths:
         git(wt, "add", "-A", "--", *paths)
+    if on_staged is not None:
+        on_staged(git(wt, "write-tree").stdout.strip())
     git(wt, *_no_hooks_args(), *_identity_args(wt), "commit", "--allow-empty", "-m", f"orch({step_id}): {title}")
     return git(wt, "rev-parse", "HEAD").stdout.strip()
 
