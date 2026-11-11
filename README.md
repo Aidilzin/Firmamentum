@@ -199,35 +199,55 @@ approval_rules:                         # the stops listed under "Safety model"
   - all_agents_rate_limited
 review: per_step                        # per_step | off
 max_repair_rounds: 3
+allow_agy_reviewer: false               # agy only reviews when true (its read-only mode is only partly verified)
+post_checks:                            # optional: file patterns that stop a step for approval (defaults shown in "Safety model")
+  protected_words: [secret, credential, token, password]
 ui: { theme: dark }                     # dark | light (optional)
 repos:                                  # the ONLY source of test commands
   orch:     { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
   practice: { path: "../orch-practice", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
 ```
 
+- `env_passthrough: [NAME, ...]` on a repo adds environment variable names that workers and test runs may see. Everything else in your environment is withheld (see "Security model and limits").
 - `test_command` gates every commit. `retest_command` is optional and is a quick re-run tried first in repair rounds.
 - Relative repo paths resolve against the folder that holds `config.yaml`.
 - If the first entry of a role hits a limit, the next entry is tried once. The entry used is shown in the live view and in `orch status`.
+
+## Security model and limits
+
+**The worktree is not a sandbox.** It keeps agents away from your checkout, nothing more.
+
+- **Tests the builder writes run with your user rights.** The test command (`uv run pytest -q` and so on) executes whatever test code or `conftest.py` the builder wrote, as you, on this machine. orch runs it again itself and once more in your real checkout after `orch merge`. The deny rules for `git`, `rm` and `pip` apply to the agent's Bash tool, not to code a test runs.
+- **So only run orch on your own repos, with tasks you wrote.** Do not paste issue text, README content or web pages you do not trust into a request: a prompt injection there can make the builder write a test that does anything you can do.
+- What the flags do limit: Claude workers run with `--restricted --strict-mcp-config` (file tools confined to the worktree, your settings, hooks and MCP servers ignored), Bash is allowed only for the exact test commands from `config.yaml`, and workers and test runs see an allow-listed environment instead of your whole one (no API keys, tokens or cloud credentials unless you list them in `env_passthrough`). What they do not limit: the test process itself.
+- Review the diff before `orch merge`, especially test files, `conftest.py`, CI files and anything that stops for approval.
+- A real sandbox (a container, WSL or a separate low-privilege Windows user) is the only complete answer and is not built yet. The audit and probe notes are in `docs/audit-fable.md` and `docs/probe-results.md`.
 
 ## Safety model
 
 | Guard or stop | What it does |
 |---|---|
 | Worktrees only | Agents edit a git worktree under `%LOCALAPPDATA%\orch\wt\<repo>\<run>` on branch `orch/<run>`, outside your checkout. Your main checkout stays clean. |
-| Path guards | `reset --hard`, `clean` and `worktree remove` refuse any path that is not a linked worktree under that root. |
-| Read-only roles | Laplace and Loschmidt run claude with `--tools Read,Grep,Glob` and no prompts. Brillouin and agy run `--mode plan`. |
-| Limited builder | Maxwell and Descartes get Edit and Write, and Bash only for the configured test commands. `git`, `uv add`, `pip`, `rm` and `del` are denied. The `rm` denial was confirmed in a real run. |
+| Path guards | `reset --hard`, `clean`, `commit` and `worktree remove` refuse any path that is not a linked worktree under that root, whose `.git` file does not point at its own worktree folder, or (for commit and reset) that is not on the run's branch. |
+| HEAD pinned per step | If HEAD or the branch moves during a step (an agent ran `git commit` or `reset`), the step stops with `git_state_changed` instead of passing with an empty diff. |
+| No repo hooks | orch's own `git commit` and `git merge` run with `core.hooksPath` pointed at an empty folder and fsmonitor off, so a hook the builder edited never runs. |
+| Read-only roles | Laplace and Loschmidt run claude with `--tools Read,Grep,Glob` and no prompts. Brillouin and agy run `--mode plan --sandbox`. agy reviews only if `allow_agy_reviewer: true`. |
+| Limited builder | Maxwell and Descartes get Edit and Write confined to the worktree (`--restricted`), and Bash only for the exact configured test commands (no trailing wildcard, so pytest flags cannot be appended). `git`, `uv add`, `pip`, `rm` and `del` are also denied. |
 | Test command from config only | The plan's `test_command` is never used. `orch` runs the tests itself and trusts the exit code, not an agent's claim. |
-| Approval stop: protected paths | Touching auth, payment or secret paths, `.env` files or keys stops the step (`touches_auth_payments_secrets_env`). |
-| Approval stop: dependencies | Changing `pyproject.toml` or `uv.lock` stops the step (`new_dependency`). |
+| Approval stop: protected paths | Changing `.env*`, `*.pem`, `*.key`, `*.pfx`, `*.p12`, `id_rsa*`, `.npmrc`, or a path with the whole word secret, credential, token or password stops the step (`touches_auth_payments_secrets_env`). |
+| Approval stop: files that run later | `.claude/**`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, CI workflows, git hook folders, `Makefile`, `conftest.py`, `pytest.ini`, `tox.ini`, `setup.cfg`, `.gitattributes` and `.gitmodules` stop the step (`executes_later`). |
+| Approval stop: dependencies | `pyproject.toml`, `uv.lock`, `requirements*.txt`, `package.json` and its lock files, `composer.json` and `composer.lock` stop the step (`new_dependency`). |
+| Approval stop: migrations | Files under `migrations/` or `alembic/` stop the step (`db_migration_or_schema`). |
+| Approval stop: orch editing itself | When the target repo is orch, `config.yaml` and `src/orch/**` stop the step (`self_hosting`). |
 | Approval stop: removed tests | Deleting a test file or a test function stops the step (`tests_removed`). |
 | Approval stop: repairs used up | Tests still failing after 3 repair rounds stop the step. Plain approve is refused. Use `approve --retry` or `reject`. |
 | Approval stop: questions | A planner or builder question (`needs_input`) waits for `orch answer`. |
 | Approval stop: no agent left | Both agents rate limited pauses the run. |
-| Approvals are per file | Approving covers only the flagged files and rules. A new flagged item stops again. |
+| Approvals are per file | Approving covers only the flagged files and rules. A new flagged item stops again. (Content-bound approvals are still to do.) |
 | Nothing failing is committed | Failing tests are never committed. With review on, nothing is committed unreviewed. |
 | Never pushes | `merge` is local only. It refuses on a dirty tree, a detached HEAD, or main or master without `--allow-main`. |
-| Credentials | `orch` never reads OAuth tokens or credential files. The child environment for `claude` has the `ANTHROPIC_*` variables removed. |
+| Credentials | `orch` never reads OAuth tokens or credential files. Children get an allow-listed environment, and `ANTHROPIC_*` is always removed. |
+| Rate limits | Detected only from stderr and the CLIs' structured error fields, never from model text or tool output. |
 
 ## Cost
 
