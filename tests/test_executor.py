@@ -228,10 +228,11 @@ def rules(path, selfhost=False):
 
 def test_default_protected_paths():
     for p in (".env", "x/.env.prod", "a.pem", "b/c.key", "c.pfx", "d.p12", "ssh/id_rsa", "id_rsa.pub", ".npmrc",
-              "my_secret.txt", "Secrets.yaml", "src/auth-token.py", "pw/password.txt", "credentials.json", "A\\TOKEN.md"):
+              "my_secret.txt", "Secrets.yaml", "src/auth-token.py", "pw/password.txt", "credentials.json", "A\\TOKEN.md",
+              "src/auth/login.py", "auth.py", "auth_utils.py", "src/Payment.py", "payment_service.py", "billing/payments.py"):
         assert "touches_auth_payments_secrets_env" in rules(p), p
     for p in ("src/app.py", "README.md", "tests/test_x.py", "environment.md", "authors.md", "secretary.md", "tokenizer.py",
-              "src/auth/login.py", "src/Payment.py"):
+              "author.py", "oauthlib.py", "paymentsx.md"):
         assert "touches_auth_payments_secrets_env" not in rules(p), p
 
 

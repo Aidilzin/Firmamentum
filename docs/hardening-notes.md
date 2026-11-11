@@ -21,9 +21,10 @@ Everything here was built and tested with fakes only: no real `claude` or `agy` 
 ## Decisions worth knowing
 
 - **Protected paths changed meaning (item 1).** The old rule matched the substrings `auth`, `payment` and `secret` anywhere in
-  a path. The new defaults follow your list: whole words `secret`, `credential`, `token`, `password` (so `my_secret.txt`,
-  `auth-token.py` and `secrets.yaml` match; `secretary.md` and `tokenizer.py` do not) plus the file patterns. `auth` and
-  `payment` are no longer protected. Add them to `post_checks.protected_words` if you want them back.
+  a path. The new defaults match whole words: `secret`, `credential`, `token`, `password`, `auth`, `payment` (so
+  `my_secret.txt`, `auth-token.py`, `src/auth/login.py`, `payment_service.py` and `secrets.yaml` match; `authors.md`,
+  `secretary.md`, `tokenizer.py` and `oauthlib.py` do not) plus the file patterns. Because it is whole-word, `authentication.py`
+  or `oauth.py` are not caught; add such words to `post_checks.protected_words` if you want them.
 - **Word boundary.** A "word" ends at any character that is not a letter or digit, so `_`, `-`, `.` and `/` all count as
   boundaries. A trailing `s` is allowed (`secrets`).
 - **Glob rules.** A pattern without `/` matches the file name at any depth (`conftest.py`, `.env*`); a pattern with `/` is
@@ -47,8 +48,7 @@ Everything here was built and tested with fakes only: no real `claude` or `agy` 
 ## Test changes you may want to look at
 
 - `test_commands.py`: an arbitrary env var (`KEEP_ME`) used to be passed on; the test now asserts it is withheld.
-- `test_executor.py`: the protected-path helper test was rewritten for the new defaults (`src/auth/login.py` and
-  `src/Payment.py` are no longer protected). Dependency tests now cover `requirements-dev.txt`, `package.json`, `composer.lock`.
+- `test_executor.py`: the protected-path helper test was rewritten for the new defaults (`auth` and `payment` were re-added to the default words in a follow-up commit). Dependency tests now cover `requirements-dev.txt`, `package.json`, `composer.lock`.
 - `test_phase4.py`: the approval-per-file test uses `token_utils.py` instead of `auth_utils.py`.
 - Four tests that exercise an agy reviewer now pass `allow_agy_reviewer=True`.
 

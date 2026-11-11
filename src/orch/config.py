@@ -74,7 +74,7 @@ class PostChecksConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     protected: list[str] = [".env*", "*.pem", "*.key", "*.pfx", "*.p12", "id_rsa*", ".npmrc"]
-    protected_words: list[str] = ["secret", "credential", "token", "password"]  # whole words in the path
+    protected_words: list[str] = ["secret", "credential", "token", "password", "auth", "payment"]  # whole words in the path
     executes_later: list[str] = [
         ".claude/**", "CLAUDE.md", "AGENTS.md", ".mcp.json", ".github/workflows/**", ".githooks/**", ".husky/**",
         "Makefile", "conftest.py", "pytest.ini", "tox.ini", "setup.cfg", ".gitattributes", ".gitmodules",

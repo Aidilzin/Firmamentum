@@ -201,7 +201,7 @@ review: per_step                        # per_step | off
 max_repair_rounds: 3
 allow_agy_reviewer: false               # agy only reviews when true (its read-only mode is only partly verified)
 post_checks:                            # optional: file patterns that stop a step for approval (defaults shown in "Safety model")
-  protected_words: [secret, credential, token, password]
+  protected_words: [secret, credential, token, password, auth, payment]
 ui: { theme: dark }                     # dark | light (optional)
 repos:                                  # the ONLY source of test commands
   orch:     { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
@@ -234,7 +234,7 @@ repos:                                  # the ONLY source of test commands
 | Read-only roles | Laplace and Loschmidt run claude with `--tools Read,Grep,Glob` and no prompts. Brillouin and agy run `--mode plan --sandbox`. agy reviews only if `allow_agy_reviewer: true`. |
 | Limited builder | Maxwell and Descartes get Edit and Write confined to the worktree (`--restricted`), and Bash only for the exact configured test commands (no trailing wildcard, so pytest flags cannot be appended). `git`, `uv add`, `pip`, `rm` and `del` are also denied. |
 | Test command from config only | The plan's `test_command` is never used. `orch` runs the tests itself and trusts the exit code, not an agent's claim. |
-| Approval stop: protected paths | Changing `.env*`, `*.pem`, `*.key`, `*.pfx`, `*.p12`, `id_rsa*`, `.npmrc`, or a path with the whole word secret, credential, token or password stops the step (`touches_auth_payments_secrets_env`). |
+| Approval stop: protected paths | Changing `.env*`, `*.pem`, `*.key`, `*.pfx`, `*.p12`, `id_rsa*`, `.npmrc`, or a path with the whole word secret, credential, token, password, auth or payment stops the step (`touches_auth_payments_secrets_env`). |
 | Approval stop: files that run later | `.claude/**`, `CLAUDE.md`, `AGENTS.md`, `.mcp.json`, CI workflows, git hook folders, `Makefile`, `conftest.py`, `pytest.ini`, `tox.ini`, `setup.cfg`, `.gitattributes` and `.gitmodules` stop the step (`executes_later`). |
 | Approval stop: dependencies | `pyproject.toml`, `uv.lock`, `requirements*.txt`, `package.json` and its lock files, `composer.json` and `composer.lock` stop the step (`new_dependency`). |
 | Approval stop: migrations | Files under `migrations/` or `alembic/` stop the step (`db_migration_or_schema`). |
