@@ -28,7 +28,7 @@ def test_claude_prompt_on_stdin_and_flags(monkeypatch):
     assert spec.argv[-2:] == ["--permission-mode", "plan"]
     for k in SCRUBBED:
         assert k not in spec.env
-    assert spec.env["KEEP_ME"] == "1"
+    assert "KEEP_ME" not in spec.env and "PATH" in spec.env  # allow-list: unknown variables are not passed on
 
 
 def test_claude_minimal_command_has_no_optional_flags():

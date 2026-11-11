@@ -44,7 +44,7 @@ class AntigravityAdapter(AgentAdapter):
         argv += request.extra_args
         # -p must carry its prompt as "-p=<prompt>" and come last, or agy swallows the next token.
         argv.append(f"-p={prompt}")
-        return CommandSpec(argv=argv, prompt_file=prompt_file, env=child_env())
+        return CommandSpec(argv=argv, prompt_file=prompt_file, env=child_env(passthrough=request.env_passthrough))
 
     def parse_output(self, out: ProcessOutput, request: AgentRequest) -> AgentResult:
         data, failed = parse_process_json("agy", out, request.timeout_s)

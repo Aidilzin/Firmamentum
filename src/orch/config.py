@@ -60,6 +60,7 @@ class RepoConfig(BaseModel):
     path: str
     test_command: str
     retest_command: str | None = None  # repair rounds only; never from a plan
+    env_passthrough: list[str] = []  # extra env var names workers and test runs may see (default: allow-list only)
 
 
 class UiConfig(BaseModel):
@@ -131,6 +132,7 @@ class ResolvedRepo(BaseModel):
     path: Path
     test_command: str | None  # None for an unconfigured path: the planner proposes one
     retest_command: str | None = None
+    env_passthrough: list[str] = []
 
 
 def default_config_path() -> Path:
@@ -176,11 +178,11 @@ def resolve_repo(cfg: Config, name_or_path: str | None) -> ResolvedRepo:
     """`None` means the current directory. A configured name wins over a path of the same text."""
     if name_or_path and name_or_path in cfg.repos:
         r = cfg.repos[name_or_path]
-        return ResolvedRepo(name=name_or_path, path=(cfg.base_dir / r.path).resolve(), test_command=r.test_command, retest_command=r.retest_command)
+        return ResolvedRepo(name=name_or_path, path=(cfg.base_dir / r.path).resolve(), test_command=r.test_command, retest_command=r.retest_command, env_passthrough=r.env_passthrough)
     path = Path(name_or_path).resolve() if name_or_path else Path.cwd().resolve()
     if not path.is_dir():
         raise ConfigError(f"repo {name_or_path!r} is neither a configured name nor an existing directory")
     for name, r in cfg.repos.items():
         if (cfg.base_dir / r.path).resolve() == path:
-            return ResolvedRepo(name=name, path=path, test_command=r.test_command, retest_command=r.retest_command)
+            return ResolvedRepo(name=name, path=path, test_command=r.test_command, retest_command=r.retest_command, env_passthrough=r.env_passthrough)
     return ResolvedRepo(name=None, path=path, test_command=None)

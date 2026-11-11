@@ -15,13 +15,35 @@ IS_WINDOWS = sys.platform == "win32"
 STDERR_TAIL_CHARS = 2000
 
 
+# Env for every child (workers and test runs) is built from an allow-list, so API keys, tokens and cloud credentials in
+# your shell never reach agent-written test code. Names are compared upper-case (Windows env names are not case
+# sensitive). Add more per repo with `env_passthrough` in config.yaml.
+ENV_ALLOW = frozenset({
+    "PATH", "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME",
+    # needed to start programs and find the user's folders on Windows; none of these hold secrets
+    "PATHEXT", "COMSPEC", "WINDIR", "SYSTEMDRIVE", "HOMEDRIVE", "HOMEPATH", "USERNAME", "USERDOMAIN", "PROGRAMDATA",
+    "PROGRAMFILES", "PROGRAMFILES(X86)", "PROGRAMW6432", "COMMONPROGRAMFILES", "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS", "OS", "LANG", "LC_ALL", "TERM", "TZ", "PYTHONUTF8", "PYTHONIOENCODING",
+    "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_GIT_BASH_PATH",
+})  # fmt: skip
+ENV_ALLOW_PREFIXES = ("UV_",)
+ENV_ALWAYS_DROP_PREFIXES = ("ANTHROPIC_",)  # never reaches any child, even via env_passthrough
 VENV_VARS = ("VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT")
 
 
-def child_env(extra_scrub: tuple[str, ...] = ()) -> dict[str, str]:
-    """Env for every child process orch starts: the parent env minus venv markers (and `extra_scrub`)."""
-    drop = {*VENV_VARS, *extra_scrub}
-    return {k: v for k, v in os.environ.items() if k not in drop}
+def child_env(extra_scrub: tuple[str, ...] = (), passthrough: tuple[str, ...] | list[str] = ()) -> dict[str, str]:
+    """Env for every child process orch starts: only allow-listed names, plus `passthrough` (per-repo config).
+    `ANTHROPIC_*` is always dropped, and so are venv markers and `extra_scrub`."""
+    extra = {p.upper() for p in passthrough}
+    drop = {d.upper() for d in (*VENV_VARS, *extra_scrub)}
+    out: dict[str, str] = {}
+    for k, v in os.environ.items():
+        u = k.upper()
+        if u in drop or u.startswith(ENV_ALWAYS_DROP_PREFIXES):
+            continue
+        if u in ENV_ALLOW or u.startswith(ENV_ALLOW_PREFIXES) or u in extra:
+            out[k] = v
+    return out
 
 
 @dataclass

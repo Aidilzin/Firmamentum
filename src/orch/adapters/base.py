@@ -46,6 +46,7 @@ class AgentRequest(BaseModel):
     json_schema: dict | None = None  # passed to --json-schema when set
     resume_id: str | None = None  # session/conversation to continue (wired up, UNTESTED)
     extra_args: list[str] = Field(default_factory=list)  # e.g. permission flags, set by later phases
+    env_passthrough: list[str] = Field(default_factory=list)  # extra env var names the child may see (per-repo config)
 
 
 class AgentResult(BaseModel):

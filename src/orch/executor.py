@@ -517,7 +517,10 @@ class Executor:
     def _agent(self, sid: str, role_name: str, build: Callable[[Entry], AgentRequest]) -> AgentResult:
         """Run one role call through the router. If every usable entry is rate limited (or cooling) the returned
         result is a RATE_LIMITED failure and `self._resume_after` says when to try again."""
-        routed = call_role(role_name, build, self.get_adapter, self.cfg)
+        def with_env(entry: Entry) -> AgentRequest:
+            return build(entry).model_copy(update={"env_passthrough": list(self.repo.env_passthrough)})
+
+        routed = call_role(role_name, with_env, self.get_adapter, self.cfg)
         self._resume_after = routed.resume_after if routed.paused else None
         if routed.paused and routed.rate_limited is None:  # nothing was called: all entries already cooling
             self.last_entry = None
@@ -755,7 +758,7 @@ class Executor:
         except ValueError as e:
             return False, {"exit_code": None, "passed": False, "error": f"bad test_command: {e}", "duration_s": 0,
                            "unrunnable": True}  # fmt: skip
-        out = run_process(argv, cwd=self.wt, env=child_env(), timeout_s=TEST_TIMEOUT_S)
+        out = run_process(argv, cwd=self.wt, env=child_env(passthrough=self.repo.env_passthrough), timeout_s=TEST_TIMEOUT_S)
         text = f"$ {command}\n[exit {out.returncode}]\n{out.stdout}\n--- stderr ---\n{out.stderr}\n"
         if out.timed_out:
             text += "\n[timed out]\n"

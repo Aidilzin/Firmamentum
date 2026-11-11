@@ -132,6 +132,10 @@ def _agent_args(role: Entry, system_text: str | None) -> tuple[list[str], str | 
     return args, system_text
 
 
+def _with_env(build: Callable[[Entry], AgentRequest], repo: ResolvedRepo) -> Callable[[Entry], AgentRequest]:
+    return lambda entry: build(entry).model_copy(update={"env_passthrough": list(repo.env_passthrough)})
+
+
 def run_scout(request: str, repo: ResolvedRepo, cfg: Config, get_adapter: AdapterFactory) -> Routed:
     prompt = SCOUT_PROMPT + f"\n\nThe planner will work on this request (for focus only): {request}"
 
@@ -139,7 +143,7 @@ def run_scout(request: str, repo: ResolvedRepo, cfg: Config, get_adapter: Adapte
         args, _ = _agent_args(entry, None)
         return AgentRequest(prompt=prompt, cwd=repo.path, model=entry.model, timeout_s=SCOUT_TIMEOUT_S, extra_args=args)
 
-    return call_role("scout", build, get_adapter, cfg)
+    return call_role("scout", _with_env(build, repo), get_adapter, cfg)
 
 
 def _feedback(errors: list[str]) -> str:
@@ -201,7 +205,7 @@ def make_plan(
             return AgentRequest(prompt=p, cwd=repo.path, model=entry.model, timeout_s=PLANNER_TIMEOUT_S,
                                 json_schema=schema, resume_id=resume_id, extra_args=args)  # fmt: skip
 
-        routed = call_role("planner", build, get_adapter, cfg)
+        routed = call_role("planner", _with_env(build, repo), get_adapter, cfg)
         _note(outcome, "planner", routed)
         return routed
 

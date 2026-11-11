@@ -41,7 +41,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         if request.resume_id:  # untested against the real CLI
             argv += ["--resume", request.resume_id]
         argv += request.extra_args
-        env = child_env(SCRUBBED_ENV)
+        env = child_env(SCRUBBED_ENV, request.env_passthrough)
         return CommandSpec(argv=argv, env=env, stdin_text=request.prompt)
 
     def parse_output(self, out: ProcessOutput, request: AgentRequest) -> AgentResult:

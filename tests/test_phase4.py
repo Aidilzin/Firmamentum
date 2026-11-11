@@ -580,17 +580,37 @@ def test_cli_merge(done_run, tmp_path, monkeypatch):
 # ---------- environment ----------
 
 
-def test_virtual_env_is_removed_from_every_child_env(monkeypatch, tmp_path):
-    for k in ("VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "ANTHROPIC_API_KEY"):
-        monkeypatch.setenv(k, "x")
-    monkeypatch.setenv("KEEP_ME", "1")
+def test_child_env_is_an_allow_list(monkeypatch, tmp_path):
+    for k, v in (("VIRTUAL_ENV", "x"), ("VIRTUAL_ENV_PROMPT", "x"), ("ANTHROPIC_API_KEY", "k"), ("ANTHROPIC_BASE_URL", "u"),
+                 ("GH_TOKEN", "t"), ("AWS_SECRET_ACCESS_KEY", "s"), ("KEEP_ME", "1"), ("UV_CACHE_DIR", "c"), ("MY_PASS", "p")):
+        monkeypatch.setenv(k, v)
     env = child_env()
-    assert "VIRTUAL_ENV" not in env and "VIRTUAL_ENV_PROMPT" not in env and env["KEEP_ME"] == "1"
-    claude = ClaudeCodeAdapter().build_command(AgentRequest(prompt="p", cwd=tmp_path)).env
-    agy = AntigravityAdapter().build_command(AgentRequest(prompt="p", cwd=tmp_path)).env
+    assert "PATH" in env and env["UV_CACHE_DIR"] == "c"
+    for gone in ("VIRTUAL_ENV", "VIRTUAL_ENV_PROMPT", "ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "GH_TOKEN",
+                 "AWS_SECRET_ACCESS_KEY", "KEEP_ME", "MY_PASS"):
+        assert gone not in env, gone
+    # per-repo passthrough adds names (case-insensitive) but can never bring back ANTHROPIC_*
+    env = child_env(passthrough=["keep_me", "ANTHROPIC_API_KEY"])
+    assert env["KEEP_ME"] == "1" and "ANTHROPIC_API_KEY" not in env and "GH_TOKEN" not in env
+    req = AgentRequest(prompt="p", cwd=tmp_path, env_passthrough=["MY_PASS"])
+    claude = ClaudeCodeAdapter().build_command(req).env
+    agy = AntigravityAdapter().build_command(req).env
     for e in (claude, agy):
-        assert "VIRTUAL_ENV" not in e and "VIRTUAL_ENV_PROMPT" not in e and e["KEEP_ME"] == "1"
-    assert "ANTHROPIC_API_KEY" not in claude
+        assert e["MY_PASS"] == "p" and "GH_TOKEN" not in e and "VIRTUAL_ENV" not in e and "ANTHROPIC_API_KEY" not in e
+    plain = ClaudeCodeAdapter().build_command(AgentRequest(prompt="p", cwd=tmp_path)).env
+    assert "MY_PASS" not in plain and "GH_TOKEN" not in AntigravityAdapter().build_command(AgentRequest(prompt="p", cwd=tmp_path)).env
+
+
+def test_test_runs_and_workers_get_the_scrubbed_env_with_repo_passthrough(env, monkeypatch):
+    repo, setup, executor = env
+    monkeypatch.setenv("GH_TOKEN", "t")
+    monkeypatch.setenv("MY_PASS", "p")
+    cmd = "python -c \"import os,sys; sys.exit(0 if ('GH_TOKEN' not in os.environ and os.environ.get('MY_PASS') == 'p') else 1)\""
+    run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=cmd)
+    rr = rr.model_copy(update={"env_passthrough": ["MY_PASS"]})
+    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"})])
+    assert ex.start().status == "done"
+    assert fb.requests[0].env_passthrough == ["MY_PASS"]
 
 
 def test_orchestrator_test_runs_have_no_virtual_env(env, monkeypatch):

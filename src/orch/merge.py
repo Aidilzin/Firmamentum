@@ -65,7 +65,7 @@ def merge_run(repo: ResolvedRepo, run_dir: Path, allow_main: bool = False) -> Me
         argv = shlex.split(repo.test_command)
     except ValueError as e:
         return MergeResult(branch, target, sha, None, f"bad test_command: {e}")
-    out = run_process(argv, cwd=path, env=child_env(), timeout_s=TEST_TIMEOUT_S)
+    out = run_process(argv, cwd=path, env=child_env(passthrough=repo.env_passthrough), timeout_s=TEST_TIMEOUT_S)
     if out.not_found or out.timed_out or out.returncode is None:
         return MergeResult(branch, target, sha, None, "timed out" if out.timed_out else "test command could not run")
     tail = "\n".join((out.stdout + out.stderr).strip().splitlines()[-15:])
