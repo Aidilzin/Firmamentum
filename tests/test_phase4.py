@@ -226,6 +226,21 @@ def test_repair_resume_failure_falls_back_to_fresh(env):
     assert "REPAIR mode" in fb.requests[1].prompt and "REPAIR mode" not in fb.requests[2].prompt
 
 
+def test_invalid_review_retry_on_a_fallback_entry_gets_the_full_prompt(env):
+    repo, setup, executor = env
+    run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))
+    bad = raw_review({"verdict": "approve", "issues": [issue("major")], "summary": "x"})
+    # opus returns an invalid review; the same-session retry is rate limited; the router hops to agy:default
+    ex, fb = executor(run_dir, rr, [edit({"a.py": "1\n"}), bad, fail(ErrorKind.RATE_LIMITED), review("approve")], **ON)
+    assert ex.start().status == "done"
+    first, retry_same, hopped = fb.requests[1], fb.requests[2], fb.requests[3]
+    assert retry_same.resume_id == "rs" and "Read this file first" not in retry_same.prompt  # short prompt, same session
+    assert hopped.extra_args[:2] == ["--mode", "plan"] and hopped.resume_id is None
+    assert "Read this file first" in hopped.prompt  # the diff instructions are back
+    assert "Previous review (invalid)" in hopped.prompt and "Your review was invalid" in hopped.prompt
+    assert "Reviewer" in hopped.prompt and first.prompt.split("\n")[0] in hopped.prompt
+
+
 def test_invalid_review_retries_once_then_fails(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))

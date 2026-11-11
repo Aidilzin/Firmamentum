@@ -803,13 +803,18 @@ class Executor:
         review, errors = _parse_json(first, review_mod.Review)
         if review is None:
             feedback = "Your review was invalid:\n" + "\n".join(f"- {e}" for e in errors) + "\nReturn the corrected JSON review."
-            second = (
-                call(lambda e: (feedback, first.session_id if e == first_entry else None)) if first.session_id else None
-            )
+            bad = json.dumps(first.structured, indent=2) if first.structured is not None else first.text
+
+            def retry_prompt(e: Entry) -> tuple[str, str | None]:
+                if e == first_entry and first.session_id:  # same entry: its session already holds the step and the diff
+                    return feedback, first.session_id
+                # another entry (the router hopped) has seen nothing: full prompt + the bad output + the feedback
+                return f"{full_prompt(e)}\n\n## Previous review (invalid)\n{bad}\n\n{feedback}", None
+
+            second = call(retry_prompt) if first.session_id else None
             if second is not None and not second.ok and second.error_kind == ErrorKind.RATE_LIMITED:
                 return self._agent_stop(sid, "reviewer", second, "review")
             if second is None or not second.ok:
-                bad = json.dumps(first.structured, indent=2) if first.structured is not None else first.text
                 second = call(lambda e: (f"{full_prompt(e)}\n\n## Previous review (invalid)\n{bad}\n\n{feedback}", None))
             if not second.ok:
                 return self._agent_stop(sid, "reviewer", second, "review")
