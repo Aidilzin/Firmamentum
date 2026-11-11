@@ -143,3 +143,36 @@ def test_check_head_sees_an_agent_commit(repo):
     git(wt.path, "add", "-A")
     git(wt.path, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "sneaky")
     assert "HEAD moved" in workspace.check_head(wt.path, wt.base_sha, "orch/run1")
+
+
+def _hook(repo_dir, name, marker):
+    d = repo_dir / ".githooks"
+    d.mkdir(exist_ok=True)
+    h = d / name
+    h.write_text(f"#!/bin/sh\necho ran > '{marker.as_posix()}'\nexit 1\n", encoding="utf-8", newline="\n")
+    return d
+
+
+def test_commit_does_not_run_repo_hooks(repo, tmp_path):
+    wt = workspace.create(repo, "proj", "run1")
+    marker = tmp_path / "hook-ran.txt"
+    _hook(wt.path, "pre-commit", marker)
+    git(wt.path, "config", "core.hooksPath", ".githooks")  # tracked hooks folder, as husky or .githooks set up
+    (wt.path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    sha = workspace.commit_step(wt.path, "s1", "A", ["a.py"])  # a failing pre-commit hook would abort this
+    assert sha and not marker.exists()
+
+
+def test_merge_does_not_run_repo_hooks(repo, tmp_path):
+    wt = workspace.create(repo, "proj", "run1")
+    (wt.path / "a.py").write_text("a = 1\n", encoding="utf-8")
+    workspace.commit_step(wt.path, "s1", "A", ["a.py"])
+    marker = tmp_path / "merge-hook-ran.txt"
+    hooks = _hook(repo, "pre-merge-commit", marker)
+    git(repo, "config", "core.hooksPath", str(hooks))
+    git(repo, "checkout", "-q", "-b", "side")
+    (repo / "b.py").write_text("b = 1\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "side change")
+    workspace.merge_no_ff(repo, "orch/run1", "merge")  # a real merge commit, so pre-merge-commit would fire
+    assert not marker.exists()

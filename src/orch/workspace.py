@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -129,6 +130,14 @@ def changed_files(wt: Path) -> list[str]:
     return sorted(set(files))
 
 
+def _no_hooks_args() -> list[str]:
+    """`-c` options for orch's own git writes (commit, merge): repo hooks never run, and no fsmonitor daemon is
+    started. A tracked hooks folder (`.githooks`, husky) is editable by the builder, so orch must not execute it."""
+    empty = Path(tempfile.gettempdir()) / "orch-no-hooks"
+    empty.mkdir(parents=True, exist_ok=True)
+    return ["-c", f"core.hooksPath={empty}", "-c", "core.fsmonitor=false"]
+
+
 def _identity_args(wt: Path) -> list[str]:
     args: list[str] = []
     if not git(wt, "config", "user.name", check=False).stdout.strip():
@@ -162,7 +171,7 @@ def commit_step(wt: Path, step_id: str, title: str, paths: list[str] | None = No
         git(wt, "add", "-A")
     elif paths:
         git(wt, "add", "-A", "--", *paths)
-    git(wt, *_identity_args(wt), "commit", "--allow-empty", "-m", f"orch({step_id}): {title}")
+    git(wt, *_no_hooks_args(), *_identity_args(wt), "commit", "--allow-empty", "-m", f"orch({step_id}): {title}")
     return git(wt, "rev-parse", "HEAD").stdout.strip()
 
 
@@ -255,7 +264,7 @@ def branch_exists(repo: Path, branch: str) -> bool:
 def merge_no_ff(repo: Path, branch: str, message: str) -> str:
     """`git merge --no-ff` into the current branch. On conflict the merge is aborted and WorkspaceError raised."""
     repo = Path(repo)
-    p = git(repo, *_identity_args(repo), "merge", "--no-ff", "-m", message, branch, check=False)
+    p = git(repo, *_no_hooks_args(), *_identity_args(repo), "merge", "--no-ff", "-m", message, branch, check=False)
     if p.returncode != 0:
         git(repo, "merge", "--abort", check=False)
         raise WorkspaceError(f"merge of {branch} failed and was aborted: {(p.stderr or p.stdout).strip()[:500]}")
