@@ -344,22 +344,22 @@ def test_approve_post_check_is_per_file_and_per_new_file(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=FILE_CMD)
     cfgo = {"review": "off", "max_repair_rounds": 3}
-    ex, _ = executor(run_dir, rr, [edit({"auth_utils.py": "v1\n"})], **cfgo)
+    ex, _ = executor(run_dir, rr, [edit({"token_utils.py": "v1\n"})], **cfgo)
     assert ex.start().status == "awaiting_approval"
     s1 = load_meta(run_dir)["steps"]["s1"]
-    assert s1["stage"] == "post_check" and s1["flagged"] == ["auth_utils.py"] and s1["tests"] is None
+    assert s1["stage"] == "post_check" and s1["flagged"] == ["token_utils.py"] and s1["tests"] is None
     # approve; tests fail (no ok.txt); repair 1 re-touches the approved file -> no new stop;
     # repair 2 writes .env (a NEW protected file) -> stops again
-    ex2, fb2 = executor(run_dir, rr, [edit({"auth_utils.py": "v2\n"}), edit({".env": "K=1\n", "ok.txt": "1"})], **cfgo)
+    ex2, fb2 = executor(run_dir, rr, [edit({"token_utils.py": "v2\n"}), edit({".env": "K=1\n", "ok.txt": "1"})], **cfgo)
     out = ex2.approve("s1")
     s1 = load_meta(run_dir)["steps"]["s1"]
     assert out.status == "awaiting_approval" and len(fb2.requests) == 2
     assert s1["flagged"] == [".env"] and s1["rounds_used"] == 2 and s1["commit"] is None
-    assert s1["approved"] == [{"file": "auth_utils.py", "rule": "touches_auth_payments_secrets_env"}]
+    assert s1["approved"] == [{"file": "token_utils.py", "rule": "touches_auth_payments_secrets_env"}]
     ex3, fb3 = executor(run_dir, rr, [], **cfgo)
     assert ex3.approve("s1").status == "done" and fb3.requests == []  # straight to tests -> commit
     s1 = load_meta(run_dir)["steps"]["s1"]
-    assert s1["commit"] and {a["file"] for a in s1["approved"]} == {"auth_utils.py", ".env"}
+    assert s1["commit"] and {a["file"] for a in s1["approved"]} == {"token_utils.py", ".env"}
 
 
 def test_approve_after_rounds_ran_out_needs_retry(env):

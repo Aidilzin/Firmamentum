@@ -67,9 +67,29 @@ class UiConfig(BaseModel):
     theme: Literal["dark", "light"] = "dark"
 
 
+class PostChecksConfig(BaseModel):
+    """Changed-file patterns that stop a step for approval (see checks.py). Globs on repo-relative paths: a pattern
+    without `/` matches the file name at any depth, one with `/` the whole path (`**` crosses folders)."""
+
+    model_config = ConfigDict(extra="forbid")
+    protected: list[str] = [".env*", "*.pem", "*.key", "*.pfx", "*.p12", "id_rsa*", ".npmrc"]
+    protected_words: list[str] = ["secret", "credential", "token", "password"]  # whole words in the path
+    executes_later: list[str] = [
+        ".claude/**", "CLAUDE.md", "AGENTS.md", ".mcp.json", ".github/workflows/**", ".githooks/**", ".husky/**",
+        "Makefile", "conftest.py", "pytest.ini", "tox.ini", "setup.cfg", ".gitattributes", ".gitmodules",
+    ]  # fmt: skip
+    dependency: list[str] = [
+        "pyproject.toml", "uv.lock", "requirements*.txt", "package.json", "package-lock.json", "pnpm-lock.yaml",
+        "yarn.lock", "composer.json", "composer.lock",
+    ]  # fmt: skip
+    migration: list[str] = ["**/migrations/**", "database/migrations/**", "alembic/**"]
+    self_hosting: list[str] = ["config.yaml", "src/orch/**"]  # only checked when the target repo is orch itself
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ui: UiConfig = UiConfig()
+    post_checks: PostChecksConfig = PostChecksConfig()
     roles: dict[str, list[Entry]]
     fallback_model: dict[str, str] = {}  # superseded by role lists; accepted and ignored
     cooldown_minutes: int = 60

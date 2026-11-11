@@ -10,7 +10,6 @@ meta.json is rewritten after every transition so a crash or a usage limit can be
 from __future__ import annotations
 
 import json
-import re
 import shlex
 import shutil
 import time
@@ -27,6 +26,7 @@ from .adapters.claude_code import CONFINE_ARGS
 from .adapters.process import child_env, run_process
 from . import review as review_mod
 from .build import BuildReport, load_schema_file
+from .checks import classify, is_self_hosting_repo, outside_plan
 from .config import Config, Entry, ResolvedRepo
 from .plan import Plan, Step
 from .planner import extract_json
@@ -41,8 +41,6 @@ TAIL_LINES = 150
 TEST_TIMEOUT_S = 10 * 60
 BUILDER_TOOLS = "Read,Grep,Glob,Edit,Write,Bash"
 DENIED_BASH = ("Bash(git)", "Bash(git *)", "Bash(uv add*)", "Bash(uv pip*)", "Bash(pip *)", "Bash(rm *)", "Bash(del *)")
-DEPENDENCY_FILES = ("pyproject.toml", "uv.lock")
-_SENSITIVE_RE = re.compile(r"auth|payment|secret", re.IGNORECASE)
 
 AdapterFactory = Callable[[str], AgentAdapter]
 
@@ -210,30 +208,6 @@ def review_prompt(
         lines += [HIDDEN_NOTE_REVIEW.format(files=", ".join(hidden_files)), ""]
     lines += ["Reply with the JSON review only."]
     return "\n".join(lines)
-
-
-def is_protected(path: str) -> bool:
-    p = path.replace("\\", "/").strip("/")
-    parts = p.split("/")
-    name = parts[-1].lower()
-    if ".git" in [x.lower() for x in parts]:
-        return True
-    if name.startswith(".env") or name.endswith((".pem", ".key")):
-        return True
-    return bool(_SENSITIVE_RE.search(p))
-
-
-def is_dependency_file(path: str) -> bool:
-    return path.replace("\\", "/").split("/")[-1] in DEPENDENCY_FILES
-
-
-def outside_plan(changed: list[str], planned: list[str]) -> list[str]:
-    norm = [p.replace("\\", "/").lstrip("./") for p in planned]
-
-    def planned_ok(f: str) -> bool:
-        return any(f == p or (p.endswith("/") and f.startswith(p)) for p in norm)
-
-    return [f for f in changed if not planned_ok(f)]
 
 
 def tail_lines(path: Path, n: int) -> str:
@@ -730,12 +704,10 @@ class Executor:
         self._set_step(sid, changed_files=changed)
         approved = {(a["file"], a["rule"]) for a in self._st(sid)["approved"]}  # per file AND rule
         hits: list[dict] = []
+        selfhost = is_self_hosting_repo(self.repo.path)
         for f in changed:
-            if is_protected(f):
-                hits.append({"file": f, "rule": "touches_auth_payments_secrets_env"})
-        for f in changed:
-            if is_dependency_file(f):
-                hits.append({"file": f, "rule": "new_dependency"})
+            for rule in classify(f, self.cfg.post_checks, selfhost):
+                hits.append({"file": f, "rule": rule})
         for item in workspace.removed_tests(self.wt):
             hits.append({"file": item, "rule": "tests_removed"})
         hits = [h for h in hits if (h["file"], h["rule"]) not in approved]

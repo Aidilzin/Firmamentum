@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 
 import pytest
 import yaml
@@ -9,7 +11,9 @@ from typer.testing import CliRunner
 from orch import budget, cli, workspace
 from orch.adapters.base import AgentAdapter, AgentResult, ErrorKind
 from orch.config import ResolvedRepo, default_config_path, load_config
-from orch.executor import ExecError, Executor, builder_args, build_prompt, is_dependency_file, is_protected, outside_plan
+from orch.checks import classify, is_self_hosting_repo, outside_plan
+from orch.config import PostChecksConfig
+from orch.executor import ExecError, Executor, builder_args, build_prompt
 from orch.plan import Plan
 from orch.runs import create_run, load_meta, write_meta
 
@@ -190,8 +194,8 @@ def test_risk_flag_stops_before_running_the_builder(env):
     assert ex2.resume().status == "awaiting_approval" and fb2.requests == []
 
 
-@pytest.mark.parametrize("path", [".env", ".env.local", "keys/server.pem", "id.key", "src/auth/login.py", "src/Payment.py",
-                                   "config/secrets.yaml"])  # fmt: skip
+@pytest.mark.parametrize("path", [".env", ".env.local", "keys/server.pem", "id.key", "deploy/id_rsa.pub", ".npmrc",
+                                   "config/secrets.yaml", "src/auth-token.py"])  # fmt: skip
 def test_protected_path_stops_with_awaiting_approval(env, path):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))
@@ -204,7 +208,7 @@ def test_protected_path_stops_with_awaiting_approval(env, path):
     assert not (run_dir / "steps" / "s1" / "tests.txt").exists()
 
 
-@pytest.mark.parametrize("name", ["pyproject.toml", "uv.lock"])
+@pytest.mark.parametrize("name", ["pyproject.toml", "uv.lock", "requirements-dev.txt", "web/package.json", "composer.lock"])
 def test_dependency_file_stops(env, name):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]))
@@ -215,13 +219,48 @@ def test_dependency_file_stops(env, name):
     assert s["rule"] == "new_dependency" and s["commit"] is None
 
 
-def test_is_protected_helpers():
-    for p in (".git/config", "a/.git/x", ".env", "x/.env.prod", "a.pem", "b/c.key", "auth.py", "pay/Payment.py", "my_secret.txt"):
-        assert is_protected(p), p
-    for p in ("src/app.py", "README.md", "tests/test_x.py", "environment.md"):
-        assert not is_protected(p), p
-    assert is_dependency_file("pyproject.toml") and is_dependency_file("sub/uv.lock")
-    assert not is_dependency_file("README.md")
+PC = PostChecksConfig()
+
+
+def rules(path, selfhost=False):
+    return classify(path, PC, selfhost)
+
+
+def test_default_protected_paths():
+    for p in (".env", "x/.env.prod", "a.pem", "b/c.key", "c.pfx", "d.p12", "ssh/id_rsa", "id_rsa.pub", ".npmrc",
+              "my_secret.txt", "Secrets.yaml", "src/auth-token.py", "pw/password.txt", "credentials.json", "A\\TOKEN.md"):
+        assert "touches_auth_payments_secrets_env" in rules(p), p
+    for p in ("src/app.py", "README.md", "tests/test_x.py", "environment.md", "authors.md", "secretary.md", "tokenizer.py",
+              "src/auth/login.py", "src/Payment.py"):
+        assert "touches_auth_payments_secrets_env" not in rules(p), p
+
+
+def test_default_executes_later_dependency_and_migration():
+    for p in (".claude/settings.json", "a/CLAUDE.md", "AGENTS.md", ".mcp.json", ".github/workflows/ci.yml", ".githooks/pre-commit",
+              ".husky/pre-commit", "Makefile", "tests/conftest.py", "pytest.ini", "tox.ini", "setup.cfg", ".gitattributes",
+              ".gitmodules"):
+        assert "executes_later" in rules(p), p
+    for p in ("pyproject.toml", "sub/uv.lock", "requirements.txt", "requirements-dev.txt", "package.json", "package-lock.json",
+              "pnpm-lock.yaml", "yarn.lock", "composer.json", "composer.lock"):
+        assert "new_dependency" in rules(p), p
+    for p in ("app/migrations/0001_init.py", "database/migrations/x.php", "alembic/env.py"):
+        assert "db_migration_or_schema" in rules(p), p
+    assert rules("README.md") == [] and rules("src/app.py") == []
+    assert "executes_later" not in rules("docs/CLAUDE.mdx")
+
+
+def test_self_hosting_rule_only_applies_to_orch_itself(tmp_path):
+    assert "self_hosting" not in rules("src/orch/executor.py") and "self_hosting" not in rules("config.yaml")
+    assert "self_hosting" in rules("src/orch/executor.py", True) and "self_hosting" in rules("config.yaml", True)
+    assert not is_self_hosting_repo(tmp_path)
+    assert is_self_hosting_repo(Path(__file__).resolve().parents[1])
+
+
+def test_patterns_come_from_config_and_case_is_ignored_on_windows():
+    cfg = PostChecksConfig(protected=["vault/**"], protected_words=[], executes_later=[], dependency=[], migration=[])
+    assert classify("vault/a.txt", cfg) == ["touches_auth_payments_secrets_env"] and classify(".env", cfg) == []
+    if os.name == "nt":
+        assert "executes_later" in rules("MAKEFILE") and "executes_later" in rules(".Claude\\Settings.json")
 
 
 def test_out_of_plan_files_warn_but_continue(env):
@@ -234,6 +273,11 @@ def test_out_of_plan_files_warn_but_continue(env):
     assert any("extra.py" in w for w in s["warnings"]) and not any("src/s1.py" in w for w in s["warnings"])
     assert any(m.startswith("warning [s1]") for m in logs)
     assert outside_plan(["a/b.py", "docs/x.md"], ["a/", "docs/x.md"]) == []
+    # dotfiles are not mangled (lstrip("./") used to turn .gitignore into gitignore); ./ prefixes are removed
+    assert outside_plan([".gitignore", "src/a.py"], [".gitignore", "./src/a.py"]) == []
+    assert outside_plan(["ab/c.py"], ["a/"]) == ["ab/c.py"]
+    if os.name == "nt":
+        assert outside_plan(["SRC\\A.py"], ["src/a.py"]) == []
 
 
 def test_changed_files_come_from_git_not_from_the_report(env):
