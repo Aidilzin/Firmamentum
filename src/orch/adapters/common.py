@@ -9,6 +9,30 @@ from .base import AgentResult, ErrorKind, failure, looks_rate_limited
 from .process import ProcessOutput
 
 
+def structured_rate_limited(agent: Literal["claude", "agy"], data: dict | None) -> bool:
+    """Rate limit signalled by the CLI's own structured fields. Never looks at model text or tool output.
+    claude: `api_error_status` 429, or `subtype` / `terminal_reason`. agy: `status`."""
+    if not isinstance(data, dict):
+        return False
+    def field_limited(*values: object) -> bool:
+        raw = [str(v) for v in values if v]
+        return looks_rate_limited(*raw, *(s.replace("_", " ").replace("-", " ") for s in raw))  # `error_rate_limit`
+
+    if agent == "claude":
+        if str(data.get("api_error_status")) == "429":
+            return True
+        return field_limited(data.get("subtype"), data.get("terminal_reason"))
+    return field_limited(data.get("status"))
+
+
+def _json_or_none(text: str) -> dict | None:
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def parse_process_json(
     agent: Literal["claude", "agy"], out: ProcessOutput, timeout_s: int
 ) -> tuple[dict | None, AgentResult | None]:
@@ -23,7 +47,9 @@ def parse_process_json(
             agent, ErrorKind.TIMEOUT, f"timed out after {timeout_s}s", tail, duration_ms=out.elapsed_ms
         )
     if out.returncode != 0:
-        kind = ErrorKind.RATE_LIMITED if looks_rate_limited(out.stderr, out.stdout) else ErrorKind.EXIT_NONZERO
+        # stderr is the CLI's own log; stdout only counts through its structured fields (it may carry tool output)
+        limited = looks_rate_limited(out.stderr) or structured_rate_limited(agent, _json_or_none(out.stdout))
+        kind = ErrorKind.RATE_LIMITED if limited else ErrorKind.EXIT_NONZERO
         return None, failure(
             agent,
             kind,
@@ -49,6 +75,8 @@ def parse_process_json(
 def agent_error(
     agent: Literal["claude", "agy"], message: str, data: dict, out: ProcessOutput, **kw
 ) -> AgentResult:
-    """AGENT_ERROR, upgraded to RATE_LIMITED if the error text or stderr matches a known pattern."""
-    kind = ErrorKind.RATE_LIMITED if looks_rate_limited(message, out.stderr) else ErrorKind.AGENT_ERROR
+    """AGENT_ERROR, upgraded to RATE_LIMITED if stderr or the CLI's structured error fields say so (never `message`,
+    which is the model's own text)."""
+    limited = looks_rate_limited(out.stderr) or structured_rate_limited(agent, data)
+    kind = ErrorKind.RATE_LIMITED if limited else ErrorKind.AGENT_ERROR
     return failure(agent, kind, message, out.stderr_tail, raw=data, duration_ms=out.elapsed_ms, **kw)

@@ -67,12 +67,34 @@ def test_agy_status_error():
 
 
 def test_rate_limit_message_in_json_and_stderr():
-    d = {"is_error": True, "subtype": "success", "result": "5-hour usage limit reached"}
+    d = {"is_error": True, "subtype": "success", "api_error_status": 429, "result": "Please try again later"}
     r = ClaudeCodeAdapter().parse_output(out(json.dumps(d)), REQ)
     assert r.error_kind is ErrorKind.RATE_LIMITED
+    d = {"is_error": True, "subtype": "error_rate_limit", "result": "x"}
+    assert ClaudeCodeAdapter().parse_output(out(json.dumps(d)), REQ).error_kind is ErrorKind.RATE_LIMITED
+    d = {"is_error": True, "subtype": "success", "terminal_reason": "usage_limit_reached", "result": "x"}
+    assert ClaudeCodeAdapter().parse_output(out(json.dumps(d)), REQ).error_kind is ErrorKind.RATE_LIMITED
     d = {"status": "ERROR", "response": "oops"}
     r = AntigravityAdapter().parse_output(out(json.dumps(d), stderr="RESOURCE_EXHAUSTED"), REQ)
     assert r.error_kind is ErrorKind.RATE_LIMITED
+    d = {"status": "RESOURCE_EXHAUSTED", "response": "oops"}
+    assert AntigravityAdapter().parse_output(out(json.dumps(d)), REQ).error_kind is ErrorKind.RATE_LIMITED
+
+
+def test_model_text_and_tool_output_never_count_as_a_rate_limit():
+    quote = "the router matches 'rate limit', 'quota' and 429 in its error text; usage limit tests pass"
+    d = {"is_error": True, "subtype": "success", "result": quote}
+    assert ClaudeCodeAdapter().parse_output(out(json.dumps(d)), REQ).error_kind is ErrorKind.AGENT_ERROR
+    d = {"status": "ERROR", "response": quote}
+    assert AntigravityAdapter().parse_output(out(json.dumps(d)), REQ).error_kind is ErrorKind.AGENT_ERROR
+    # non-zero exit: stdout is not scanned as text, only through its structured fields
+    for adapter in (ClaudeCodeAdapter(), AntigravityAdapter()):
+        r = adapter.parse_output(out(quote, rc=1), REQ)
+        assert r.error_kind is ErrorKind.EXIT_NONZERO
+        r = adapter.parse_output(out(json.dumps({"result": quote, "is_error": True}), rc=1), REQ)
+        assert r.error_kind is ErrorKind.EXIT_NONZERO
+    d = {"is_error": True, "api_error_status": 429, "result": "x"}
+    assert ClaudeCodeAdapter().parse_output(out(json.dumps(d), rc=1), REQ).error_kind is ErrorKind.RATE_LIMITED
 
 
 def test_rate_limit_on_nonzero_exit():
