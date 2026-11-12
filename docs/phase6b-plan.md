@@ -32,7 +32,7 @@ The audit (`docs/audit-fable.md`, 11 Nov) found six things that change this plan
 2. P2: resume at the stored phase, reset per-attempt fields on rebuild (H6).
 3. P3: cancel token through `run_process`, router and executor, plus the `cancelled` outcome (D1).
 4. P4: typed events with frozen snapshots (D3).
-5. P5: `services.py` and `NextAction`; one-shot output unchanged (D4).
+5. P5: `services.py` and `NextAction`; one-shot output unchanged (D4). **Done 12 Nov:** `plan_run`, `answer_plan`, `build_executor` + `drive`, `next_actions`, `diff_run`, `merge`, `clean_run`; the Typer commands only print. 76 golden files in `tests/golden/` pin the one-shot output. Also in P5: M11, and Ctrl-C during planning (exit 130).
 6. P6: the `Session` object (D7).
 
 After the prep, build step 5 below (services extraction) is already done, and build step 7 (stop) shrinks to wiring Ctrl-C and `/stop` to `Executor.cancel()`. Streaming (D2) and content-bound approvals (H8, H9, D5) stay in 6c and 6d.

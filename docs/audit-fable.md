@@ -316,6 +316,8 @@ On a non-zero exit the regex is run over all of stdout and stderr; on an agent e
 
 **Fix:** keep `needs_input` (plus `resume_after`) when the re-plan did not produce a plan, and write `request.md` only on success.
 
+**Status:** fixed in P5 (12 Nov 2026), `services.answer_plan`. A failed, rate-limited or cancelled re-plan leaves the run `needs_input` and prints the `orch answer` line again; a rate-limited one now exits 3, as `orch plan` does.
+
 ### M12. Model text is printed raw: terminal escapes can spoof the approval screen
 
 **Where:** `src/orch/cli.py:227`, `:303-309`, `:366-375`, `:398`; `src/orch/plan.py:94-111`; `src/orch/ui.py:132` (stop panel built from a plain `str`, so rich markup is parsed). Check: **read**.
@@ -371,6 +373,8 @@ Everything from `Executor.start()` down to `proc.communicate()` is one blocking 
 `plan`, `run`, `_answer_plan`, `diff`, `merge`, `clean` mix the work with `typer.echo` and `raise typer.Exit`. `_drive` always ends by raising. A shell would have to call Typer commands and catch `SystemExit`, or copy the code. `next_commands` returns finished shell strings with `# comments` in them, so 6d cannot map them to `[a] [r] [d]` keys without parsing its own output.
 
 **Fix before 6b:** a `service.py` with functions that return data (`plan_run(...) -> PlanResult`, `drive(...) -> ExecOutcome`, `next_actions(meta) -> list[NextAction(kind, run_id, step, reason)]`). Typer commands and slash commands both become thin printers over it; the string form of `NextAction` is one renderer.
+
+**Status:** fixed in P5 (12 Nov 2026), `src/orch/services.py`. Two differences from the sketch above: `next_actions(meta, run_dir, repo_name)` also takes the run folder (worktree and stale-run checks), and driving a run is `build_executor(...)` then `drive(ex, action)`, so the caller can wire its own stop handling to the executor.
 
 ### D5. A decision and "run to the end" are one call
 

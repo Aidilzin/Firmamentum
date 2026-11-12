@@ -137,7 +137,9 @@ Every command that takes a run id also accepts a unique prefix of it and `--repo
 | `merge` | `--no-ff` merge into your current branch, then runs the tests (`--allow-main`) | `orch merge 20261110T --repo orch` |
 | `clean` | Removes the worktree and keeps the branch | `orch clean 20261110T --repo orch` |
 
-Exit codes of `exec`, `run`, `resume`, `approve` and `answer`: 0 done, 1 failed, 2 needs input, needs approval or refused, 3 paused.
+Exit codes of `plan`, `exec`, `run`, `resume`, `approve` and `answer`: 0 done, 1 failed, 2 needs input, needs approval or refused, 3 paused, 130 stopped by you.
+
+**Ctrl-C.** One press stops the current agent call and saves the run; a second press stops at once. During a build, `orch resume` continues the step. During planning (`plan`, the first part of `run`, or `answer` for a planner question) there is no plan to resume, so orch prints the `orch plan "..."` command that starts again; after `answer` the question simply stays open.
 
 **Live view.** `exec`, `run`, `resume`, `approve` and `answer` draw the constellation and one line per demon (see [Screens, theme and doctor](#screens-theme-and-doctor)), with the model used (marked `(fallback)` when it is not the first choice), plus a footer with total tokens and run status. When a run stops, a panel says what happened, why, and the exact next command. Use `--plain`, or pipe the output, for line-by-line text with a `--- STOPPED ---` block instead.
 
