@@ -5,13 +5,20 @@ over this module. An expected refusal is raised as `ServiceError`, which carries
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 from . import workspace
-from .config import ResolvedRepo
+from .adapters.base import AgentAdapter
+from .config import Config, ResolvedRepo
+from .events import RunEvent
+from .executor import ExecError, ExecOutcome, Executor
 from .merge import MergeError, MergeResult, merge_run
 from .runs import RunNotFound, is_stale, load_meta
+from .view import parse_utc
 
 EXIT_CODES = {"done": 0, "failed": 1, "needs_input": 2, "awaiting_approval": 2, "paused": 3, "rejected": 1, "cancelled": 130}
 STOPPED_STATUSES = ("awaiting_approval", "needs_input", "failed")
@@ -182,3 +189,42 @@ def clean_run(target: ResolvedRepo, run_dir: Path) -> CleanResult:
     except workspace.WorkspaceError as e:
         raise ServiceError(str(e)) from e
     return CleanResult(True, removed, ex["worktree"], ex["branch"])
+
+
+# ---------- executing a run ----------
+
+DRIVE_ACTIONS = ("start", "resume", "approve", "reject", "answer")
+
+
+def build_executor(
+    target: ResolvedRepo,
+    run_dir: Path,
+    cfg: Config,
+    get_adapter: Callable[[str], AgentAdapter],
+    *,
+    log: Callable[[str], None],
+    on_event: Callable[[RunEvent], None] | None = None,
+    hidden_tests: Path | None = None,
+    cancel: threading.Event | None = None,
+) -> Executor:
+    """The executor for one run. The caller owns the view (`log`, `on_event`) and the stop handling
+    (`ex.cancel()`, `ex.stop_now()`), then hands the executor to `drive`."""
+    return Executor(target, run_dir, cfg, get_adapter, log=log, on_event=on_event, hidden_tests=hidden_tests, cancel=cancel)
+
+
+def drive(ex: Executor, action: str = "start", **kw) -> ExecOutcome:
+    """Run one executor action (start, resume, approve, reject, answer) until the run stops. Blocks."""
+    if action not in DRIVE_ACTIONS:
+        raise ValueError(f"unknown action {action!r}")
+    try:
+        return getattr(ex, action)(**kw)
+    except (ExecError, workspace.WorkspaceError, RunNotFound) as e:
+        raise ServiceError(str(e), 2) from e
+
+
+def resume_blocked_until(meta: dict, force: bool = False, now: datetime | None = None) -> datetime | None:
+    """When a paused run may be resumed, if that is still in the future and `force` is not set; else None."""
+    after = parse_utc(meta.get("resume_after")) if meta.get("status") == "paused" else None
+    if after is None or force or after <= (now or datetime.now(timezone.utc)):
+        return None
+    return after

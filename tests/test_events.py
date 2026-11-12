@@ -486,7 +486,7 @@ from io import StringIO  # noqa: E402
 
 from rich.console import Console  # noqa: E402
 
-from orch import cli  # noqa: E402
+from orch import cli, services  # noqa: E402
 from orch.executor import ExecOutcome  # noqa: E402
 from orch.ui import LiveView, PlainView, render_plain  # noqa: E402
 from orch.view import build_run_view  # noqa: E402
@@ -600,7 +600,7 @@ def test_drive_hands_a_live_view_on_event_and_a_plain_view_nothing(monkeypatch, 
         def start(self):
             return ExecOutcome("done", None, "ok")
 
-    monkeypatch.setattr(cli, "Executor", StubExecutor)
+    monkeypatch.setattr(services, "Executor", StubExecutor)
     monkeypatch.setattr(cli, "_install_sigint", lambda ex: None)
     monkeypatch.setattr(cli, "_emit_status", lambda *a, **k: None)
     monkeypatch.setattr(cli, "next_commands", lambda *a, **k: [])

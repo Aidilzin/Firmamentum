@@ -22,8 +22,8 @@ from .adapters import AgentAdapter, AgentRequest, AntigravityAdapter, ClaudeCode
 from . import budget
 from .budget import run_agent, summary, summary_by_model
 from .config import ConfigError, apply_overrides, load_config, resolve_repo
-from . import services, versions, workspace
-from .executor import ExecError, ExecOutcome, Executor, check_hidden_tests
+from . import services, versions
+from .executor import ExecError, check_hidden_tests
 from .theme import current_theme, demon_label, demon_name, resolve_theme, set_theme
 from .ui import make_view, render_doctor, render_plain, render_rich
 from . import doctor as doctor_mod
@@ -399,7 +399,7 @@ def _result_text(outcome) -> str:
     return outcome.status + (f" ({outcome.step_id})" if outcome.step_id else "") + (f": {outcome.message}" if outcome.message else "")
 
 
-def _install_sigint(ex: Executor):
+def _install_sigint(ex):
     """Ctrl-C during a run: 1st press cancels (the agent is killed, the step saved), 2nd stops now (waits only for a
     commit or a save in progress), 3rd exits at once. The default handler is NOT put back while stopping.
     Returns the previous handler, or None when not on the main thread."""
@@ -428,15 +428,15 @@ def _restore_sigint(previous) -> None:
 
 def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None, **kw) -> None:
     view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()}, current_theme())
-    ex = Executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
-                  on_event=view.on_event if view.live else None, hidden_tests=hidden_tests)  # fmt: skip
+    ex = services.build_executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
+                                 on_event=view.on_event if view.live else None, hidden_tests=hidden_tests)  # fmt: skip
     previous = _install_sigint(ex)
     try:
         with view:
-            outcome: ExecOutcome = getattr(ex, action)(**kw)
-    except (ExecError, workspace.WorkspaceError, RunNotFound) as e:
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(2)
+            outcome = services.drive(ex, action, **kw)
+    except services.ServiceError as e:
+        typer.echo(f"Error: {e.message}", err=True)
+        raise typer.Exit(e.code)
     finally:
         _restore_sigint(previous)
     typer.echo("")
@@ -475,9 +475,8 @@ def resume(
     cfg = _load_cfg(model)
     target = _repo_or_exit(cfg, repo)
     run_dir = _find_or_exit(target, run_id)
-    meta = load_meta(run_dir)
-    after = _parse_utc(meta.get("resume_after")) if meta.get("status") == "paused" else None
-    if after is not None and after > datetime.now(timezone.utc) and not force:
+    after = services.resume_blocked_until(load_meta(run_dir), force)
+    if after is not None:
         typer.echo(f"Run is paused until {_local(after)} (usage limit). Use --force to try earlier.", err=True)
         raise typer.Exit(3)
     _drive(target, run_dir, cfg, "resume", plain=plain)
