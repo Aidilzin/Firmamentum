@@ -1,0 +1,19 @@
+exit: 0
+--- output ---
+Run: <RUN>
+Goal: Add a version command
+Test command: uv run pytest -q
+Assumptions:
+  - package version comes from importlib.metadata
+
+1. [s1] Do s1
+   Change things for s1 because the request needs it.
+   depends on: none
+   files: src/s1.py
+   acceptance: tests for s1 pass
+   risk flags: none
+
+[planned | 70 tokens | 1 call(s)]
+Next: orch exec <RUN> --repo demo
+--- stderr ---
+--- end ---

@@ -53,14 +53,21 @@ def _dump(path: Path, data: object) -> None:
 
 
 def save_outcome(
-    run_dir: Path, outcome: PlannerOutcome, models: dict[str, str | None], created: datetime | None = None
+    run_dir: Path,
+    outcome: PlannerOutcome,
+    models: dict[str, str | None],
+    created: datetime | None = None,
+    status_without_plan: str = "failed",
 ) -> dict:
-    """Write plan.json, planner_raw.json, scout.md (if used) and meta.json. Returns the meta dict."""
+    """Write plan.json, planner_raw.json, scout.md (if used) and meta.json. Returns the meta dict.
+
+    `status_without_plan` is the run status when no plan came back: `failed` for a new run, `needs_input` for a
+    re-plan after an answer (the old plan.json is still there and still waits for the answer)."""
     if outcome.plan is not None:
         status = "needs_input" if outcome.plan.needs_input else "planned"
         _dump(run_dir / "plan.json", outcome.plan.model_dump(mode="json"))
     else:
-        status = "failed"
+        status = status_without_plan
     _dump(
         run_dir / "planner_raw.json",
         {

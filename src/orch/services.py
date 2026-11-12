@@ -18,7 +18,7 @@ from .events import RunEvent
 from .executor import ExecError, ExecOutcome, Executor, check_hidden_tests
 from .merge import MergeError, MergeResult, merge_run
 from .planner import PlannerOutcome, make_plan
-from .runs import RunNotFound, create_run, is_stale, load_meta, save_outcome
+from .runs import RunNotFound, create_run, is_stale, load_meta, load_plan, save_outcome, write_meta
 from .view import parse_utc
 
 EXIT_CODES = {"done": 0, "failed": 1, "needs_input": 2, "awaiting_approval": 2, "paused": 3, "rejected": 1, "cancelled": 130}
@@ -297,3 +297,41 @@ def plan_run(
     models = planned_models(outcome, cfg, (["scout"] if scout else []) + ["planner"])
     meta = save_outcome(run_dir, outcome, models)
     return PlanResult(run_dir, outcome, meta, _plan_next(outcome, meta, run_dir, target.name))
+
+
+def answer_plan(
+    target: ResolvedRepo,
+    cfg: Config,
+    run_dir: Path,
+    text: str,
+    get_adapter: Callable[[str], AgentAdapter],
+) -> PlanResult:
+    """Answer the planner's question and plan again.
+
+    When the new attempt gives no plan (it failed or every entry is rate limited) the run stays `needs_input` and
+    request.md is not touched, so the same answer can simply be given again (audit M11)."""
+    stored = load_plan(run_dir)
+    meta = load_meta(run_dir)
+    if stored is None or not stored.needs_input:
+        raise ServiceError("this run's plan is not waiting for an answer.", 2)
+    request = (run_dir / "request.md").read_text(encoding="utf-8").strip()
+    clarified = f"{request}\n\n## Clarification\nQuestion: {stored.question}\nAnswer: {text}"
+    raw = run_dir / "planner_raw.json"
+    if raw.exists():  # keep every attempt
+        n = 1
+        while (run_dir / f"planner_raw.{n}.json").exists():
+            n += 1
+        raw.rename(run_dir / f"planner_raw.{n}.json")
+    outcome = make_plan(clarified, target, cfg, get_adapter)
+    models = meta.get("models") or planned_models(outcome, cfg, ["planner"])
+    new_meta = save_outcome(run_dir, outcome, models, status_without_plan="needs_input")
+    new_meta["total_tokens"] += int(meta.get("total_tokens", 0))
+    old_roles = meta.get("plan_role_tokens") or {"planner": int(meta.get("total_tokens", 0))}
+    new_meta["plan_role_tokens"] = {
+        r: new_meta["plan_role_tokens"].get(r, 0) + old_roles.get(r, 0) for r in {*new_meta["plan_role_tokens"], *old_roles}
+    }
+    write_meta(run_dir, new_meta)
+    if outcome.plan is None:
+        return PlanResult(run_dir, outcome, new_meta, next_actions(new_meta, run_dir, target.name))
+    (run_dir / "request.md").write_text(clarified + "\n", encoding="utf-8")
+    return PlanResult(run_dir, outcome, new_meta, _plan_next(outcome, new_meta, run_dir, target.name))

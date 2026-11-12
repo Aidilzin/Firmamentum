@@ -2,6 +2,7 @@ exit: 1
 --- output ---
 Run: <RUN>
 Error: planner failed: AGENT_ERROR: nope
+Next: orch answer <RUN> "<your answer>" --repo demo   # the plan needs an answer
 --- stderr ---
 Error: planner failed: AGENT_ERROR: nope
 --- end ---

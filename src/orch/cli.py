@@ -29,9 +29,8 @@ from . import doctor as doctor_mod
 from . import home as home_mod
 from .view import build_run_view, duration, fmt_elapsed
 from .plan import format_plan
-from .planner import make_plan
 from .services import EXIT_CODES, next_actions
-from .runs import RunNotFound, create_run, find_run, is_stale, list_runs, load_meta, load_plan, run_tokens, save_outcome, write_meta
+from .runs import RunNotFound, find_run, is_stale, list_runs, load_meta, load_plan, run_tokens
 
 app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.")
 
@@ -195,6 +194,8 @@ def _print_plan(r: services.PlanResult, *, summary: bool, details: bool = False)
         if details:
             typer.echo(f"Details: {r.run_dir / 'planner_raw.json'}  [{outcome.total_tokens} tokens]", err=True)
         typer.echo(f"Error: {outcome.error}", err=True)
+        for n in r.next:
+            typer.echo(f"Next: {n}")
         raise typer.Exit(r.exit_code)
     typer.echo(format_plan(outcome.plan))
     if summary:
@@ -287,10 +288,6 @@ def _load_cfg(model: list[str] | None):
     except ConfigError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
-
-
-def _cmd(run_id: str, repo_name: str | None, text: str) -> str:
-    return f"orch {text}" + (f" --repo {repo_name}" if repo_name else "")
 
 
 def next_commands(run_dir: Path, repo_name: str | None = None) -> list[str]:
@@ -521,43 +518,6 @@ def reject(
     _drive(target, _find_or_exit(target, run_id), cfg, "reject", step_id=step)
 
 
-def _answer_plan(target, cfg, run_dir: Path, text: str) -> None:
-    stored = load_plan(run_dir)
-    meta = load_meta(run_dir)
-    if stored is None or not stored.needs_input:
-        typer.echo("Error: this run's plan is not waiting for an answer.", err=True)
-        raise typer.Exit(2)
-    request = (run_dir / "request.md").read_text(encoding="utf-8").strip()
-    clarification = f"\n\n## Clarification\nQuestion: {stored.question}\nAnswer: {text}"
-    raw = run_dir / "planner_raw.json"
-    if raw.exists():
-        n = 1
-        while (run_dir / f"planner_raw.{n}.json").exists():
-            n += 1
-        raw.rename(run_dir / f"planner_raw.{n}.json")
-    outcome = make_plan(request + clarification, target, cfg, lambda name: get_adapter(AgentName(name)))
-    models = meta.get("models") or services.planned_models(outcome, cfg, ["planner"])
-    new_meta = save_outcome(run_dir, outcome, models)
-    new_meta["total_tokens"] += int(meta.get("total_tokens", 0))
-    old_roles = meta.get("plan_role_tokens") or {"planner": int(meta.get("total_tokens", 0))}
-    new_meta["plan_role_tokens"] = {
-        r: new_meta["plan_role_tokens"].get(r, 0) + old_roles.get(r, 0) for r in {*new_meta["plan_role_tokens"], *old_roles}
-    }
-    write_meta(run_dir, new_meta)
-    (run_dir / "request.md").write_text(request + clarification + "\n", encoding="utf-8")
-    typer.echo(f"Run: {run_dir.name}")
-    if outcome.plan is None:
-        typer.echo(f"Error: {outcome.error}", err=True)
-        raise typer.Exit(1)
-    typer.echo(format_plan(outcome.plan))
-    typer.echo(f"\n[{new_meta['status']} | {outcome.total_tokens} tokens | {len(outcome.results)} call(s)]")
-    if outcome.plan.needs_input:
-        for n in next_commands(run_dir, target.name):
-            typer.echo(f"Next: {n}")
-        raise typer.Exit(2)
-    typer.echo(f"Next: {_cmd(run_dir.name, target.name, f'exec {run_dir.name}')}")
-
-
 @app.command()
 def answer(
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
@@ -573,7 +533,10 @@ def answer(
     run_dir = _find_or_exit(target, run_id)
     meta = load_meta(run_dir)
     if not meta.get("steps") and step is None and meta.get("status") == "needs_input":
-        _answer_plan(target, cfg, run_dir, text)
+        r = _or_exit(services.answer_plan, target, cfg, run_dir, text, lambda name: get_adapter(AgentName(name)))
+        _print_plan(r, summary=True)
+        for n in r.next:
+            typer.echo(f"Next: {n}")
         return
     _drive(target, run_dir, cfg, "answer", plain=plain, step_id=step, text=text)
 

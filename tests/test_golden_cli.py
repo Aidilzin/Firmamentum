@@ -332,15 +332,19 @@ def test_answer_plan_asks_again(g, monkeypatch):
     g[3]("answer_plan_needs_input", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
 
 
-def test_answer_plan_replan_fails(g, monkeypatch):
-    _, run_dir = _asked(g, monkeypatch, [fail()])
+def test_answer_plan_replan_fails_and_can_be_answered_again(g, monkeypatch):
+    _, run_dir = _asked(g, monkeypatch, [fail(), planner(ONE)])
     g[3]("answer_plan_failed", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
+    assert load_meta(run_dir)["status"] == "needs_input"  # M11: still answerable
+    g[3]("answer_plan_retry_planned", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
+    assert (run_dir / "request.md").read_text(encoding="utf-8").count("Answer: sqlite") == 1
 
 
 def test_answer_plan_replan_is_rate_limited(g, monkeypatch):
     _, run_dir = _asked(g, monkeypatch, [])
     cool_claude()
     g[3]("answer_plan_paused", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
+    assert load_meta(run_dir)["status"] == "needs_input" and load_meta(run_dir)["resume_after"]
 
 
 def test_answer_plan_that_is_not_waiting(g, monkeypatch):

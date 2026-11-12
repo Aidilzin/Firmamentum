@@ -10,9 +10,10 @@ import pytest
 from plan_factory import good_plan, step
 from test_executor import FakeBuilder, edit, env, fail  # noqa: F401  (env is a fixture)
 
-from orch import services
+from orch import budget, services
 from orch.adapters.base import AgentResult, ErrorKind
 from orch.config import ResolvedRepo, load_config
+from orch.runs import load_meta, load_plan
 from orch.services import NextAction, next_actions
 
 
@@ -143,3 +144,71 @@ def test_check_run_request_refuses_before_any_call(env, tmp_path):
     with pytest.raises(services.ServiceError, match="inside the target repo"):
         services.check_run_request(ResolvedRepo(name="demo", path=repo, test_command="x"), repo)
     services.check_run_request(ResolvedRepo(name="demo", path=repo, test_command="x"))
+
+
+# ---------- answering the planner (audit M11) ----------
+
+ASK = good_plan(needs_input=True, question="Which database?", steps=[])
+ONE = good_plan(steps=[step("s1")])
+
+
+def _asked(repo, actions):
+    rr = ResolvedRepo(name="demo", path=repo, test_command="pytest -q")
+    fb = FakeBuilder([planner(ASK), *actions])
+    r = services.plan_run("add storage", rr, CFG(), lambda name: fb)
+    assert r.state == "needs_input"
+    return rr, fb, r.run_dir
+
+
+def test_answer_plan_success_writes_the_clarification_once_and_adds_the_tokens(env):
+    repo, _, _ = env
+    rr, fb, run_dir = _asked(repo, [planner(ONE)])
+    r = services.answer_plan(rr, CFG(), run_dir, "sqlite", lambda name: fb)
+    assert (r.state, r.exit_code) == ("planned", 0) and r.meta["total_tokens"] == 140
+    assert [a.kind for a in r.next] == ["exec"] and load_meta(run_dir)["status"] == "planned"
+    assert (run_dir / "request.md").read_text(encoding="utf-8").count("Answer: sqlite") == 1
+    assert (run_dir / "planner_raw.1.json").is_file()
+
+
+def test_a_failed_replan_keeps_needs_input_and_can_be_answered_again(env):
+    repo, _, _ = env
+    rr, fb, run_dir = _asked(repo, [fail(), planner(ONE)])
+    before = (run_dir / "request.md").read_text(encoding="utf-8")
+    r = services.answer_plan(rr, CFG(), run_dir, "sqlite", lambda name: fb)
+    assert (r.state, r.exit_code) == ("failed", 1) and [a.kind for a in r.next] == ["answer_plan"]
+    meta = load_meta(run_dir)
+    assert meta["status"] == "needs_input" and "planner failed" in meta["error"] and meta["total_tokens"] == 70
+    assert (run_dir / "request.md").read_text(encoding="utf-8") == before  # written only on success
+    assert load_plan(run_dir).needs_input  # the old plan still waits
+    again = services.answer_plan(rr, CFG(), run_dir, "sqlite", lambda name: fb)
+    assert again.state == "planned" and load_meta(run_dir)["status"] == "planned"
+    assert (run_dir / "request.md").read_text(encoding="utf-8").count("## Clarification") == 1
+    assert fb.requests[2].prompt.count("Answer: sqlite") == 1  # the retry does not repeat the clarification
+    assert (run_dir / "planner_raw.1.json").is_file() and (run_dir / "planner_raw.2.json").is_file()
+    assert again.meta["total_tokens"] == 140
+
+
+def test_a_rate_limited_replan_keeps_needs_input_and_the_resume_time(env):
+    repo, _, _ = env
+    rr, fb, run_dir = _asked(repo, [])
+    until = datetime.now(timezone.utc) + timedelta(hours=2)
+    budget.record_cooldown("claude", "*", until, "5h limit")
+    r = services.answer_plan(rr, CFG(), run_dir, "sqlite", lambda name: fb)
+    assert (r.state, r.exit_code) == ("paused", 3) and len(fb.requests) == 1
+    meta = load_meta(run_dir)
+    assert meta["status"] == "needs_input" and datetime.fromisoformat(meta["resume_after"]) == until.replace(microsecond=0)
+    assert "## Clarification" not in (run_dir / "request.md").read_text(encoding="utf-8")
+    budget.clear_cooldowns()
+    fb.actions.append(planner(ONE))
+    assert services.answer_plan(rr, CFG(), run_dir, "sqlite", lambda name: fb).state == "planned"
+    assert "resume_after" not in load_meta(run_dir)
+
+
+def test_answer_plan_refuses_a_plan_that_is_not_waiting(env):
+    repo, _, _ = env
+    rr = ResolvedRepo(name="demo", path=repo, test_command="pytest -q")
+    fb = FakeBuilder([planner(ONE)])
+    run_dir = services.plan_run("x", rr, CFG(), lambda name: fb).run_dir
+    with pytest.raises(services.ServiceError, match="not waiting") as e:
+        services.answer_plan(rr, CFG(), run_dir, "sqlite", lambda name: fb)
+    assert e.value.code == 2 and len(fb.requests) == 1
