@@ -8,10 +8,11 @@ from pathlib import Path
 
 import pytest
 from plan_factory import good_plan, step
-from test_executor import FakeBuilder, edit, env  # noqa: F401  (env is a fixture)
+from test_executor import FakeBuilder, edit, env, fail  # noqa: F401  (env is a fixture)
 
 from orch import services
-from orch.config import load_config
+from orch.adapters.base import AgentResult, ErrorKind
+from orch.config import ResolvedRepo, load_config
 from orch.services import NextAction, next_actions
 
 
@@ -102,3 +103,43 @@ def test_resume_blocked_until_only_for_a_paused_run_in_the_future():
     assert services.resume_blocked_until({"status": "failed", "resume_after": later}, now=now) is None
     assert services.resume_blocked_until({"status": "paused", "resume_after": (now - timedelta(minutes=1)).isoformat()}, now=now) is None
     assert services.resume_blocked_until({"status": "paused"}, now=now) is None
+
+
+# ---------- planning ----------
+
+
+def planner(structured, tokens=70):
+    return lambda req: AgentResult(agent="claude", ok=True, error_kind=ErrorKind.OK, structured=structured,
+                                   session_id="p", total_tokens=tokens)  # fmt: skip
+
+
+def test_plan_run_returns_the_run_the_outcome_and_the_next_action(env):
+    repo, setup, executor = env
+    rr = ResolvedRepo(name="demo", path=repo, test_command="pytest -q")
+    fb = FakeBuilder([planner(good_plan())])
+    r = services.plan_run("Add a version command", rr, CFG(), lambda name: fb)
+    assert (r.state, r.exit_code) == ("planned", 0) and r.outcome.plan is not None
+    assert r.meta["status"] == "planned" and r.meta["models"] == {"planner": "claude:opus"}
+    assert [str(a) for a in r.next] == [f"orch exec {r.run_dir.name} --repo demo"] and r.next[0].kind == "exec"
+    assert (r.run_dir / "plan.json").is_file()
+
+
+def test_plan_run_states_for_a_question_and_a_failure(env):
+    repo, setup, executor = env
+    rr = ResolvedRepo(name=None, path=repo, test_command="pytest -q")
+    ask = good_plan(needs_input=True, question="Which database?", steps=[])
+    r = services.plan_run("add storage", rr, CFG(), lambda name: FakeBuilder([planner(ask)]))
+    assert (r.state, r.exit_code) == ("needs_input", 2) and [a.kind for a in r.next] == ["answer_plan"]
+    assert r.next[0].repo is None
+    bad = services.plan_run("bad", rr, CFG(), lambda name: FakeBuilder([fail()]))
+    assert (bad.state, bad.exit_code, bad.next) == ("failed", 1, []) and "planner failed" in bad.outcome.error
+
+
+def test_check_run_request_refuses_before_any_call(env, tmp_path):
+    repo, setup, executor = env
+    with pytest.raises(services.ServiceError, match="no test_command") as e:
+        services.check_run_request(ResolvedRepo(name=None, path=repo, test_command=None))
+    assert e.value.code == 2
+    with pytest.raises(services.ServiceError, match="inside the target repo"):
+        services.check_run_request(ResolvedRepo(name="demo", path=repo, test_command="x"), repo)
+    services.check_run_request(ResolvedRepo(name="demo", path=repo, test_command="x"))

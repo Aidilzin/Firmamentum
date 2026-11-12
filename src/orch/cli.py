@@ -23,7 +23,6 @@ from . import budget
 from .budget import run_agent, summary, summary_by_model
 from .config import ConfigError, apply_overrides, load_config, resolve_repo
 from . import services, versions
-from .executor import ExecError, check_hidden_tests
 from .theme import current_theme, demon_label, demon_name, resolve_theme, set_theme
 from .ui import make_view, render_doctor, render_plain, render_rich
 from . import doctor as doctor_mod
@@ -188,16 +187,22 @@ def cooldowns(
         typer.echo(f"{c.agent}:{c.model if c.model != '*' else '*':<10} until {_local(c.until)}  {c.reason[:80]!r}")
 
 
-def _planned_models(outcome, cfg, roles: list[str]) -> dict[str, str]:
-    """Entry that actually served each role (falls back to the first configured entry when no call was made)."""
-    used = {r["role"]: r["entry"] for r in outcome.routes}
-    return {r: used.get(r) or cfg.roles[r][0].label for r in roles}
-
-
-def _planning_stopped(outcome) -> None:
-    """Print why planning stopped; exit 3 when it was a rate-limit pause, else 1."""
-    typer.echo(f"Error: {outcome.error}", err=True)
-    raise typer.Exit(3 if outcome.paused else 1)
+def _print_plan(r: services.PlanResult, *, summary: bool, details: bool = False) -> None:
+    """Print a planning result. Returns only for a usable plan; exits when planning stopped or needs an answer."""
+    typer.echo(f"Run: {r.run_dir.name}")
+    outcome = r.outcome
+    if outcome.plan is None:
+        if details:
+            typer.echo(f"Details: {r.run_dir / 'planner_raw.json'}  [{outcome.total_tokens} tokens]", err=True)
+        typer.echo(f"Error: {outcome.error}", err=True)
+        raise typer.Exit(r.exit_code)
+    typer.echo(format_plan(outcome.plan))
+    if summary:
+        typer.echo(f"\n[{r.meta['status']} | {outcome.total_tokens} tokens | {len(outcome.results)} call(s)]")
+    if outcome.plan.needs_input:
+        for n in r.next:
+            typer.echo(f"Next: {n}")
+        raise typer.Exit(r.exit_code)
 
 
 def _repo_or_exit(cfg, repo_arg):
@@ -222,21 +227,10 @@ def plan(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
     target = _repo_or_exit(cfg, repo)
-    run_dir = create_run(target.path, request)
-    outcome = make_plan(request, target, cfg, lambda name: get_adapter(AgentName(name)), use_scout=scout)
-    models = _planned_models(outcome, cfg, (["scout"] if scout else []) + ["planner"])
-    meta = save_outcome(run_dir, outcome, models)
-    typer.echo(f"Run: {run_dir.name}")
-    if outcome.plan is None:
-        typer.echo(f"Details: {run_dir / 'planner_raw.json'}  [{outcome.total_tokens} tokens]", err=True)
-        _planning_stopped(outcome)
-    typer.echo(format_plan(outcome.plan))
-    typer.echo(f"\n[{meta['status']} | {outcome.total_tokens} tokens | {len(outcome.results)} call(s)]")
-    if outcome.plan.needs_input:
-        for n in next_commands(run_dir, target.name):
-            typer.echo(f"Next: {n}")
-        raise typer.Exit(2)
-    typer.echo(f"Next: {_cmd(run_dir.name, target.name, f'exec {run_dir.name}')}")
+    r = services.plan_run(request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout)
+    _print_plan(r, summary=True, details=True)
+    for n in r.next:
+        typer.echo(f"Next: {n}")
 
 
 @app.command()
@@ -494,29 +488,10 @@ def run(
     """Plan, then execute, in one go."""
     cfg = _load_cfg(model)
     target = _repo_or_exit(cfg, repo)
-    if not target.test_command:
-        typer.echo("Error: this repo has no test_command in config.yaml; refusing to run.", err=True)
-        raise typer.Exit(2)
-    if hidden_tests is not None:  # refuse before any quota is spent
-        try:
-            check_hidden_tests(hidden_tests, target.path)
-        except ExecError as e:
-            typer.echo(f"Error: {e}", err=True)
-            raise typer.Exit(2)
-    run_dir = create_run(target.path, request)
-    outcome = make_plan(request, target, cfg, lambda name: get_adapter(AgentName(name)), use_scout=scout)
-    roles = (["scout"] if scout else []) + ["planner"]
-    models = _planned_models(outcome, cfg, roles)
-    save_outcome(run_dir, outcome, models)
-    typer.echo(f"Run: {run_dir.name}")
-    if outcome.plan is None:
-        _planning_stopped(outcome)
-    typer.echo(format_plan(outcome.plan))
-    if outcome.plan.needs_input:
-        for n in next_commands(run_dir, target.name):
-            typer.echo(f"Next: {n}")
-        raise typer.Exit(2)
-    _drive(target, run_dir, cfg, "start", plain=plain, hidden_tests=hidden_tests)
+    _or_exit(services.check_run_request, target, hidden_tests)  # refuse before any quota is spent
+    r = services.plan_run(request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout)
+    _print_plan(r, summary=False)
+    _drive(target, r.run_dir, cfg, "start", plain=plain, hidden_tests=hidden_tests)
 
 
 @app.command()
@@ -561,7 +536,7 @@ def _answer_plan(target, cfg, run_dir: Path, text: str) -> None:
             n += 1
         raw.rename(run_dir / f"planner_raw.{n}.json")
     outcome = make_plan(request + clarification, target, cfg, lambda name: get_adapter(AgentName(name)))
-    models = meta.get("models") or _planned_models(outcome, cfg, ["planner"])
+    models = meta.get("models") or services.planned_models(outcome, cfg, ["planner"])
     new_meta = save_outcome(run_dir, outcome, models)
     new_meta["total_tokens"] += int(meta.get("total_tokens", 0))
     old_roles = meta.get("plan_role_tokens") or {"planner": int(meta.get("total_tokens", 0))}

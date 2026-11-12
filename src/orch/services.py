@@ -6,7 +6,7 @@ over this module. An expected refusal is raised as `ServiceError`, which carries
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -15,9 +15,10 @@ from . import workspace
 from .adapters.base import AgentAdapter
 from .config import Config, ResolvedRepo
 from .events import RunEvent
-from .executor import ExecError, ExecOutcome, Executor
+from .executor import ExecError, ExecOutcome, Executor, check_hidden_tests
 from .merge import MergeError, MergeResult, merge_run
-from .runs import RunNotFound, is_stale, load_meta
+from .planner import PlannerOutcome, make_plan
+from .runs import RunNotFound, create_run, is_stale, load_meta, save_outcome
 from .view import parse_utc
 
 EXIT_CODES = {"done": 0, "failed": 1, "needs_input": 2, "awaiting_approval": 2, "paused": 3, "rejected": 1, "cancelled": 130}
@@ -44,6 +45,7 @@ _COMMANDS = {
     "diff_step": "diff {run_id} --step {step}",
     "diff_run": "diff {run_id}",
     "merge": "merge {run_id}",
+    "exec": "exec {run_id}",
 }
 _ALWAYS_COMMENTED = ("approve", "approve_retry", "answer_step")  # the reason is printed even when it is missing
 
@@ -228,3 +230,70 @@ def resume_blocked_until(meta: dict, force: bool = False, now: datetime | None =
     if after is None or force or after <= (now or datetime.now(timezone.utc)):
         return None
     return after
+
+
+# ---------- planning ----------
+
+PLAN_EXIT_CODES = {"planned": 0, "needs_input": 2, "failed": 1, "paused": 3, "cancelled": 130}
+
+
+@dataclass
+class PlanResult:
+    """A planning attempt: the stored run, what the planner returned, and what to do next."""
+
+    run_dir: Path
+    outcome: PlannerOutcome
+    meta: dict
+    next: list[NextAction] = field(default_factory=list)
+
+    @property
+    def state(self) -> str:
+        """planned | needs_input | failed | paused (every entry is rate limited) | cancelled."""
+        if self.outcome.plan is not None:
+            return "needs_input" if self.outcome.plan.needs_input else "planned"
+        return "paused" if self.outcome.paused else "failed"
+
+    @property
+    def exit_code(self) -> int:
+        return PLAN_EXIT_CODES[self.state]
+
+
+def planned_models(outcome: PlannerOutcome, cfg: Config, roles: list[str]) -> dict[str, str]:
+    """Entry that actually served each role (falls back to the first configured entry when no call was made)."""
+    used = {r["role"]: r["entry"] for r in outcome.routes}
+    return {r: used.get(r) or cfg.roles[r][0].label for r in roles}
+
+
+def _plan_next(outcome: PlannerOutcome, meta: dict, run_dir: Path, repo_name: str | None) -> list[NextAction]:
+    if outcome.plan is None:
+        return []
+    if outcome.plan.needs_input:
+        return next_actions(meta, run_dir, repo_name)
+    return [NextAction("exec", run_dir.name, repo=repo_name or None)]
+
+
+def check_run_request(target: ResolvedRepo, hidden_tests: Path | None = None) -> None:
+    """Refuse `run` before any quota is spent: no test command, or a hidden-tests folder the builder could see."""
+    if not target.test_command:
+        raise ServiceError("this repo has no test_command in config.yaml; refusing to run.", 2)
+    if hidden_tests is not None:
+        try:
+            check_hidden_tests(hidden_tests, target.path)
+        except ExecError as e:
+            raise ServiceError(str(e), 2) from e
+
+
+def plan_run(
+    request: str,
+    target: ResolvedRepo,
+    cfg: Config,
+    get_adapter: Callable[[str], AgentAdapter],
+    *,
+    scout: bool = False,
+) -> PlanResult:
+    """Create a run, ask the planner (after an optional scout) and store what came back."""
+    run_dir = create_run(target.path, request)
+    outcome = make_plan(request, target, cfg, get_adapter, use_scout=scout)
+    models = planned_models(outcome, cfg, (["scout"] if scout else []) + ["planner"])
+    meta = save_outcome(run_dir, outcome, models)
+    return PlanResult(run_dir, outcome, meta, _plan_next(outcome, meta, run_dir, target.name))
