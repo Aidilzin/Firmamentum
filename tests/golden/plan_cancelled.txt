@@ -1,0 +1,14 @@
+exit: 130
+--- output ---
+Run: <RUN>
+
+stopping the run (Ctrl-C again: stop now)
+Details: <TMP>/proj/.orch/runs/<RUN>/planner_raw.json  [0 tokens]
+Error: planning cancelled by you
+Next: orch plan "make slugify keep digits" --repo demo   # planning was cancelled; this starts a new run
+--- stderr ---
+
+stopping the run (Ctrl-C again: stop now)
+Details: <TMP>/proj/.orch/runs/<RUN>/planner_raw.json  [0 tokens]
+Error: planning cancelled by you
+--- end ---

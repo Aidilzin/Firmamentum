@@ -17,7 +17,7 @@ from .config import Config, ResolvedRepo
 from .events import RunEvent
 from .executor import ExecError, ExecOutcome, Executor, check_hidden_tests
 from .merge import MergeError, MergeResult, merge_run
-from .planner import PlannerOutcome, make_plan
+from .planner import PlannerOutcome, cancelled_outcome, make_plan
 from .runs import RunNotFound, create_run, is_stale, load_meta, load_plan, save_outcome, write_meta
 from .view import parse_utc
 
@@ -46,8 +46,14 @@ _COMMANDS = {
     "diff_run": "diff {run_id}",
     "merge": "merge {run_id}",
     "exec": "exec {run_id}",
+    "plan_again": "plan {text}",
 }
 _ALWAYS_COMMENTED = ("approve", "approve_retry", "answer_step")  # the reason is printed even when it is missing
+
+
+def _quoted(text: str) -> str:
+    """One shell argument on one line: whitespace runs become one space, double quotes are escaped."""
+    return '"' + " ".join(text.split()).replace('"', chr(92) + '"') + '"'
 
 
 @dataclass(frozen=True)
@@ -61,6 +67,7 @@ class NextAction:
     repo: str | None = None  # configured repo name: adds ` --repo NAME`
     alt: NextAction | None = None  # reject (beside approve), merge (after diff_run)
     path: Path | None = None  # step_failed: where the step's files are
+    text: str | None = None  # plan_again: the original request
 
     @property
     def command(self) -> str | None:
@@ -68,7 +75,8 @@ class NextAction:
         template = _COMMANDS.get(self.kind)
         if template is None:
             return None
-        return "orch " + template.format(run_id=self.run_id, step=self.step) + (f" --repo {self.repo}" if self.repo else "")
+        words = template.format(run_id=self.run_id, step=self.step, text=_quoted(self.text or ""))
+        return f"orch {words}" + (f" --repo {self.repo}" if self.repo else "")
 
     def __str__(self) -> str:
         if self.kind == "step_failed":
@@ -251,6 +259,8 @@ class PlanResult:
         """planned | needs_input | failed | paused (every entry is rate limited) | cancelled."""
         if self.outcome.plan is not None:
             return "needs_input" if self.outcome.plan.needs_input else "planned"
+        if self.outcome.cancelled:
+            return "cancelled"
         return "paused" if self.outcome.paused else "failed"
 
     @property
@@ -272,6 +282,16 @@ def _plan_next(outcome: PlannerOutcome, meta: dict, run_dir: Path, repo_name: st
     return [NextAction("exec", run_dir.name, repo=repo_name or None)]
 
 
+def _make_plan(request, target, cfg, get_adapter, *, use_scout: bool = False, cancel=None) -> PlannerOutcome:
+    """make_plan, with a raw interrupt (second Ctrl-C) turned into the cancelled outcome so the run is always stored."""
+    try:
+        return make_plan(request, target, cfg, get_adapter, use_scout=use_scout, cancel=cancel)
+    except KeyboardInterrupt:
+        if cancel is not None:
+            cancel.set()
+        return cancelled_outcome()
+
+
 def check_run_request(target: ResolvedRepo, hidden_tests: Path | None = None) -> None:
     """Refuse `run` before any quota is spent: no test command, or a hidden-tests folder the builder could see."""
     if not target.test_command:
@@ -290,12 +310,19 @@ def plan_run(
     get_adapter: Callable[[str], AgentAdapter],
     *,
     scout: bool = False,
+    cancel: threading.Event | None = None,
 ) -> PlanResult:
-    """Create a run, ask the planner (after an optional scout) and store what came back."""
+    """Create a run, ask the planner (after an optional scout) and store what came back.
+
+    A cancelled planning is stored as `failed` (there is no plan to resume); the next action is to plan again."""
     run_dir = create_run(target.path, request)
-    outcome = make_plan(request, target, cfg, get_adapter, use_scout=scout)
+    outcome = _make_plan(request, target, cfg, get_adapter, use_scout=scout, cancel=cancel)
     models = planned_models(outcome, cfg, (["scout"] if scout else []) + ["planner"])
     meta = save_outcome(run_dir, outcome, models)
+    if outcome.cancelled:
+        again = NextAction("plan_again", run_dir.name, reason="planning was cancelled; this starts a new run",
+                           repo=target.name or None, text=request)  # fmt: skip
+        return PlanResult(run_dir, outcome, meta, [again])
     return PlanResult(run_dir, outcome, meta, _plan_next(outcome, meta, run_dir, target.name))
 
 
@@ -305,10 +332,12 @@ def answer_plan(
     run_dir: Path,
     text: str,
     get_adapter: Callable[[str], AgentAdapter],
+    *,
+    cancel: threading.Event | None = None,
 ) -> PlanResult:
     """Answer the planner's question and plan again.
 
-    When the new attempt gives no plan (it failed or every entry is rate limited) the run stays `needs_input` and
+    When the new attempt gives no plan (it failed, was cancelled or every entry is rate limited) the run stays `needs_input` and
     request.md is not touched, so the same answer can simply be given again (audit M11)."""
     stored = load_plan(run_dir)
     meta = load_meta(run_dir)
@@ -322,7 +351,7 @@ def answer_plan(
         while (run_dir / f"planner_raw.{n}.json").exists():
             n += 1
         raw.rename(run_dir / f"planner_raw.{n}.json")
-    outcome = make_plan(clarified, target, cfg, get_adapter)
+    outcome = _make_plan(clarified, target, cfg, get_adapter, cancel=cancel)
     models = meta.get("models") or planned_models(outcome, cfg, ["planner"])
     new_meta = save_outcome(run_dir, outcome, models, status_without_plan="needs_input")
     new_meta["total_tokens"] += int(meta.get("total_tokens", 0))

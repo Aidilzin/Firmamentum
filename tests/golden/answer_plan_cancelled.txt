@@ -1,0 +1,12 @@
+exit: 130
+--- output ---
+Run: <RUN>
+
+stopping the run (Ctrl-C again: stop now)
+Error: planning cancelled by you
+Next: orch answer <RUN> "<your answer>" --repo demo   # the plan needs an answer
+--- stderr ---
+
+stopping the run (Ctrl-C again: stop now)
+Error: planning cancelled by you
+--- end ---

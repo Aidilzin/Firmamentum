@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Callable
 
 from pydantic import ValidationError
 
-from .adapters.base import AgentAdapter, AgentRequest, AgentResult
+from .adapters.base import AgentAdapter, AgentRequest, AgentResult, ErrorKind
 from .adapters.claude_code import CONFINE_ARGS
 from .router import Routed, call_role
 from .config import Config, Entry, ResolvedRepo
@@ -46,6 +47,7 @@ class PlannerOutcome:
     routes: list[dict] = field(default_factory=list)  # {role, entry, fallback} per call
     paused: bool = False  # every entry for a role is rate limited / cooling
     resume_after: datetime | None = None
+    cancelled: bool = False  # the caller's cancel token was set (Ctrl-C): no retry, no fallback
 
     @property
     def results(self) -> list[AgentResult]:
@@ -136,14 +138,16 @@ def _with_env(build: Callable[[Entry], AgentRequest], repo: ResolvedRepo) -> Cal
     return lambda entry: build(entry).model_copy(update={"env_passthrough": list(repo.env_passthrough)})
 
 
-def run_scout(request: str, repo: ResolvedRepo, cfg: Config, get_adapter: AdapterFactory) -> Routed:
+def run_scout(
+    request: str, repo: ResolvedRepo, cfg: Config, get_adapter: AdapterFactory, cancel: threading.Event | None = None
+) -> Routed:
     prompt = SCOUT_PROMPT + f"\n\nThe planner will work on this request (for focus only): {request}"
 
     def build(entry: Entry) -> AgentRequest:
         args, _ = _agent_args(entry, None)
         return AgentRequest(prompt=prompt, cwd=repo.path, model=entry.model, timeout_s=SCOUT_TIMEOUT_S, extra_args=args)
 
-    return call_role("scout", _with_env(build, repo), get_adapter, cfg)
+    return call_role("scout", _with_env(build, repo), get_adapter, cfg, cancel=cancel)
 
 
 def _feedback(errors: list[str]) -> str:
@@ -166,6 +170,20 @@ def _pause(outcome: PlannerOutcome, role: str, routed: Routed) -> PlannerOutcome
     return outcome
 
 
+CANCELLED_TEXT = "planning cancelled by you"
+
+
+def cancelled_outcome(outcome: PlannerOutcome | None = None) -> PlannerOutcome:
+    """Mark planning as cancelled by the user. Whatever was already called stays in the outcome (tokens, raw replies)."""
+    outcome = outcome or PlannerOutcome(plan=None, attempts=[])
+    outcome.plan, outcome.cancelled, outcome.error = None, True, CANCELLED_TEXT
+    return outcome
+
+
+def _was_cancelled(result: AgentResult | None) -> bool:
+    return result is not None and result.error_kind == ErrorKind.CANCELLED
+
+
 def make_plan(
     request: str,
     repo: ResolvedRepo,
@@ -173,17 +191,21 @@ def make_plan(
     get_adapter: AdapterFactory,
     *,
     use_scout: bool = False,
+    cancel: threading.Event | None = None,
 ) -> PlannerOutcome:
+    """`cancel` (set by Ctrl-C or the shell) kills the running call; the outcome then has `cancelled=True`."""
     outcome = PlannerOutcome(plan=None, attempts=[])
     scout_text: str | None = None
     if use_scout:
-        routed = run_scout(request, repo, cfg, get_adapter)
+        routed = run_scout(request, repo, cfg, get_adapter, cancel)
         _note(outcome, "scout", routed)
         if routed.paused:
             if routed.rate_limited is not None:
                 outcome.scout = routed.rate_limited
             return _pause(outcome, "scout", routed)
         outcome.scout = routed.result
+        if _was_cancelled(outcome.scout):
+            return cancelled_outcome(outcome)
         if not outcome.scout.ok:
             outcome.error = f"scout failed: {outcome.scout.error_kind.value}: {outcome.scout.text}"
             return outcome
@@ -205,7 +227,7 @@ def make_plan(
             return AgentRequest(prompt=p, cwd=repo.path, model=entry.model, timeout_s=PLANNER_TIMEOUT_S,
                                 json_schema=schema, resume_id=resume_id, extra_args=args)  # fmt: skip
 
-        routed = call_role("planner", _with_env(build, repo), get_adapter, cfg)
+        routed = call_role("planner", _with_env(build, repo), get_adapter, cfg, cancel=cancel)
         _note(outcome, "planner", routed)
         return routed
 
@@ -216,6 +238,9 @@ def make_plan(
         return _pause(outcome, "planner", first_routed)
     first = first_routed.result
     first_entry.append(first_routed.entry)
+    if _was_cancelled(first):
+        outcome.attempts.append(Attempt(first))
+        return cancelled_outcome(outcome)
     if not first.ok:
         outcome.attempts.append(Attempt(first))
         outcome.error = f"planner failed: {first.error_kind.value}: {first.text}"
@@ -243,6 +268,9 @@ def make_plan(
                 outcome.attempts.append(Attempt(resumed.rate_limited))
             return _pause(outcome, "planner", resumed)
         second = resumed.result
+        if _was_cancelled(second):
+            outcome.attempts.append(Attempt(second))
+            return cancelled_outcome(outcome)
         if not second.ok:
             outcome.attempts.append(Attempt(second, ["resume call failed: " + second.error_kind.value]))
             second = None
@@ -253,6 +281,9 @@ def make_plan(
                 outcome.attempts.append(Attempt(again.rate_limited))
             return _pause(outcome, "planner", again)
         second = again.result
+    if _was_cancelled(second):
+        outcome.attempts.append(Attempt(second))
+        return cancelled_outcome(outcome)
     if not second.ok:
         outcome.attempts.append(Attempt(second))
         outcome.error = f"planner retry failed: {second.error_kind.value}: {second.text}"

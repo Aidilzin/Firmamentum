@@ -228,7 +228,7 @@ def plan(
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
     target = _repo_or_exit(cfg, repo)
-    r = services.plan_run(request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout)
+    r = _planning(services.plan_run, request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout)
     _print_plan(r, summary=True, details=True)
     for n in r.next:
         typer.echo(f"Next: {n}")
@@ -417,6 +417,33 @@ def _restore_sigint(previous) -> None:
         signal.signal(signal.SIGINT, previous)
 
 
+class _PlanStop:
+    """What Ctrl-C drives while the planner runs: the same two calls as an Executor, on a cancel token."""
+
+    def __init__(self) -> None:
+        self.event = threading.Event()
+
+    def cancel(self) -> None:
+        self.event.set()
+
+    def stop_now(self) -> None:
+        self.event.set()
+        raise KeyboardInterrupt
+
+
+def _planning(fn, *args, **kw) -> services.PlanResult:
+    """Run a planning service with Ctrl-C wired to its cancel token (1st press cancels, 2nd stops now, 3rd exits)."""
+    stop = _PlanStop()
+    previous = _install_sigint(stop)
+    try:
+        return fn(*args, cancel=stop.event, **kw)
+    except KeyboardInterrupt:  # the second press landed outside the planner call
+        typer.echo("Error: planning cancelled by you", err=True)
+        raise typer.Exit(130)
+    finally:
+        _restore_sigint(previous)
+
+
 def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None, **kw) -> None:
     view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()}, current_theme())
     ex = services.build_executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
@@ -486,7 +513,7 @@ def run(
     cfg = _load_cfg(model)
     target = _repo_or_exit(cfg, repo)
     _or_exit(services.check_run_request, target, hidden_tests)  # refuse before any quota is spent
-    r = services.plan_run(request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout)
+    r = _planning(services.plan_run, request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout)
     _print_plan(r, summary=False)
     _drive(target, r.run_dir, cfg, "start", plain=plain, hidden_tests=hidden_tests)
 
@@ -533,7 +560,7 @@ def answer(
     run_dir = _find_or_exit(target, run_id)
     meta = load_meta(run_dir)
     if not meta.get("steps") and step is None and meta.get("status") == "needs_input":
-        r = _or_exit(services.answer_plan, target, cfg, run_dir, text, lambda name: get_adapter(AgentName(name)))
+        r = _or_exit(_planning, services.answer_plan, target, cfg, run_dir, text, lambda name: get_adapter(AgentName(name)))
         _print_plan(r, summary=True)
         for n in r.next:
             typer.echo(f"Next: {n}")
