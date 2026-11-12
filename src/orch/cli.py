@@ -387,7 +387,8 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
     if not meta.get("steps"):
         lines.append("(not started)")
     by_role, total = run_tokens(meta)
-    lines.append(f"Run tokens: {total:,} total (" + ", ".join(f"{demon_name(r)}={n:,}" for r, n in by_role.items()) + ")")
+    roles = ", ".join(f"{demon_name(r)}={n:,}" for r, n in by_role.items())
+    lines.append(f"Run tokens: {total:,} total" + (f" ({roles})" if roles else ""))
     nxt = next_commands(run_dir, repo_name)
     if nxt:
         lines.append("Needs from you:")
@@ -397,8 +398,8 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
 
 def _emit_status(run_dir: Path, repo_name: str | None = None, header: bool = True) -> None:
     """Constellation + demon lines (coloured on a terminal, plain otherwise), then the detailed step table."""
-    if header:
-        view = build_run_view(load_meta(run_dir))
+    view = build_run_view(load_meta(run_dir)) if header else None
+    if view is not None and (view.steps or view.demons):  # a run that has not started has nothing to draw
         theme = current_theme()
         if sys.stdout.isatty():
             Console().print(render_rich(view, theme, with_footer=False))

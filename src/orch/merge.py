@@ -69,4 +69,4 @@ def merge_run(repo: ResolvedRepo, run_dir: Path, allow_main: bool = False) -> Me
     if out.not_found or out.timed_out or out.returncode is None:
         return MergeResult(branch, target, sha, None, "timed out" if out.timed_out else "test command could not run")
     tail = "\n".join((out.stdout + out.stderr).strip().splitlines()[-15:])
-    return MergeResult(branch, target, sha, out.returncode == 0, f"exit {out.returncode}\n{tail}")
+    return MergeResult(branch, target, sha, out.returncode == 0, f"exit {out.returncode}" + (f"\n{tail}" if tail else ""))

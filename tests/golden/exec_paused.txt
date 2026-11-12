@@ -11,7 +11,7 @@ Paused until <WHEN>
 step  status                tokens  tests       rounds  review   commit    time    title
 s1    pending                    0  -           0       -        -         <T>    Do s1
       error: rate limited
-Run tokens: 0 total ()
+Run tokens: 0 total
 Needs from you:
   orch resume <RUN> --repo demo   # after the usage limit resets
 
