@@ -1,0 +1,17 @@
+exit: 0
+--- output ---
+@  step 1 of 1 · running · Do s1
+# Maxwell   building s1                 sonnet · <T>
+
+Run: <RUN>  status: executing (stale)  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    running                  100  -           0       -        -         <T>    Do s1
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+      question: Which db?
+Run tokens: 100 total (Maxwell=100)
+Needs from you:
+  orch resume <RUN> --repo demo   # the run died mid-step
+--- stderr ---
+--- end ---

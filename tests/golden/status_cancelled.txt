@@ -1,0 +1,17 @@
+exit: 0
+--- output ---
+.  step 1 of 1 · stopped by you · Do s1
+# Maxwell   built 1 step                sonnet · 0
+
+Run: <RUN>  status: cancelled  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    pending                    0  -           0       -        -         <T>    Do s1
+      tokens by role: Maxwell=0
+      models used: Maxwell=claude:sonnet
+      error: cancelled
+Run tokens: 0 total (Maxwell=0)
+Needs from you:
+  orch resume <RUN> --repo demo   # stopped by you
+--- stderr ---
+--- end ---

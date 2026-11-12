@@ -1,0 +1,18 @@
+exit: 0
+--- output ---
+[!]  step 1 of 1 · needs your answer · Do s1
+# Maxwell   built 1 step                sonnet · 100
+
+Run: <RUN>  status: needs_input  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    needs_input              100  -           0       -        -         <T>    Do s1
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+      question: Which db?
+Run tokens: 100 total (Maxwell=100)
+Needs from you:
+  orch answer <RUN> --step s1 "<your answer>" --repo demo   # Which db?
+  orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+--- stderr ---
+--- end ---

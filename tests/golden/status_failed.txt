@@ -1,0 +1,18 @@
+exit: 0
+--- output ---
+[x]  step 1 of 1 · failed · Do s1
+# Maxwell   built 1 step                sonnet · 0
+
+Run: <RUN>  status: failed  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    failed                     0  -           0       -        -         <T>    Do s1
+      tokens by role: Maxwell=0
+      models used: Maxwell=claude:sonnet
+      error: AGENT_ERROR: nope
+Run tokens: 0 total (Maxwell=0)
+Needs from you:
+  (step s1 failed: AGENT_ERROR: nope; see <TMP>/proj/.orch/runs/<RUN>/steps/s1; start a new run)
+  orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+--- stderr ---
+--- end ---

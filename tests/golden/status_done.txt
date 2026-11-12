@@ -1,0 +1,19 @@
+exit: 0
+--- output ---
+*---*  step 2 of 2 · done · Do s2
+# Maxwell   built 2 steps               sonnet · 200
+
+Run: <RUN>  status: done  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    done                     100  pass        0       -        <SHA>  <T>    Do s1
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+s2    done                     100  pass        0       -        <SHA>  <T>    Do s2
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+Run tokens: 200 total (Maxwell=200)
+Needs from you:
+  orch diff <RUN> --repo demo   # review, then: orch merge <RUN> --repo demo
+--- stderr ---
+--- end ---
