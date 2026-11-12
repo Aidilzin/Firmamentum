@@ -32,6 +32,7 @@ from .view import build_run_view, duration, fmt_elapsed
 from .merge import MergeError, merge_run
 from .plan import format_plan
 from .planner import make_plan
+from .services import EXIT_CODES, STOPPED_STATUSES, next_actions
 from .runs import RunNotFound, create_run, find_run, is_stale, list_runs, load_meta, load_plan, run_tokens, save_outcome, write_meta
 
 app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.")
@@ -286,49 +287,13 @@ def _load_cfg(model: list[str] | None):
         raise typer.Exit(2)
 
 
-EXIT_CODES = {"done": 0, "failed": 1, "needs_input": 2, "awaiting_approval": 2, "paused": 3, "rejected": 1, "cancelled": 130}
-
-
 def _cmd(run_id: str, repo_name: str | None, text: str) -> str:
     return f"orch {text}" + (f" --repo {repo_name}" if repo_name else "")
 
 
 def next_commands(run_dir: Path, repo_name: str | None = None) -> list[str]:
     """The exact command(s) the human should run next, one line per stopped step."""
-    meta = load_meta(run_dir)
-    rid = run_dir.name
-    out: list[str] = []
-    if meta.get("status") == "needs_input" and not meta.get("steps"):
-        return [f'{_cmd(rid, repo_name, f"answer {rid} " + chr(34) + "<your answer>" + chr(34))}   # the plan needs an answer']
-    for sid, st in (meta.get("steps") or {}).items():
-        status, stage = st["status"], st.get("stage")
-        if status == "awaiting_approval" and stage == "repairs_exhausted":
-            out.append(f"{_cmd(rid, repo_name, f'approve {rid} --step {sid} --retry')}   # another set of repair rounds"
-                       f"  (or: {_cmd(rid, repo_name, f'reject {rid} --step {sid}')})")  # fmt: skip
-        elif status == "awaiting_approval":
-            out.append(f"{_cmd(rid, repo_name, f'approve {rid} --step {sid}')}   # {st.get('rule')}"
-                       f"  (or: {_cmd(rid, repo_name, f'reject {rid} --step {sid}')})")  # fmt: skip
-        elif status == "needs_input":
-            ans = f'answer {rid} --step {sid} "<your answer>"'
-            out.append(f"{_cmd(rid, repo_name, ans)}   # {st.get('question')}")
-        elif status == "failed":
-            out.append(f"(step {sid} failed: {st.get('error')}; see {run_dir / 'steps' / sid}; start a new run)")
-        elif status == "pending" and st.get("error") == "rate limited":
-            out.append(f"{_cmd(rid, repo_name, f'resume {rid}')}   # after the usage limit resets")
-        elif status == "pending" and st.get("error") == "cancelled":
-            out.append(f"{_cmd(rid, repo_name, f'resume {rid}')}   # stopped by you")
-    ex = meta.get("exec") or {}
-    if ex.get("worktree") and Path(ex["worktree"]).is_dir():
-        for sid, st in (meta.get("steps") or {}).items():
-            if st["status"] in STOPPED_STATUSES and not st.get("commit"):
-                out.append(f"{_cmd(rid, repo_name, f'diff {rid} --step {sid}')}   # the uncommitted change of this step")
-    if meta.get("status") in ("paused", "cancelled") and not out:
-        out.append(_cmd(rid, repo_name, f"resume {rid}"))
-    if is_stale(run_dir, meta):
-        out.append(f"{_cmd(rid, repo_name, f'resume {rid}')}   # the run died mid-step")
-    if meta.get("status") == "done" and not meta.get("merged_sha"):
-        out.append(f"{_cmd(rid, repo_name, f'diff {rid}')}   # review, then: {_cmd(rid, repo_name, f'merge {rid}')}")
-    return out
+    return [str(a) for a in next_actions(load_meta(run_dir), run_dir, repo_name)]
 
 
 def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
@@ -687,9 +652,6 @@ def doctor(
     console.print(Text(f"{len(checks)} checks: {bad} failed, {warn} to look at.",
                        style=theme.style("error" if bad else ("warning" if warn else "success"))))  # fmt: skip
     raise typer.Exit(doctor_mod.exit_code(checks))
-
-
-STOPPED_STATUSES = ("awaiting_approval", "needs_input", "failed")
 
 
 def _uncommitted_header(sid: str, st: dict) -> str:
