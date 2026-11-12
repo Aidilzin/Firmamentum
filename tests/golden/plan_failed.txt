@@ -1,0 +1,9 @@
+exit: 1
+--- output ---
+Run: <RUN>
+Details: <TMP>/proj/.orch/runs/<RUN>/planner_raw.json  [140 tokens]
+Error: the planner returned an invalid plan twice. Last errors: a plan needs at least one step unless needs_input is true
+--- stderr ---
+Details: <TMP>/proj/.orch/runs/<RUN>/planner_raw.json  [140 tokens]
+Error: the planner returned an invalid plan twice. Last errors: a plan needs at least one step unless needs_input is true
+--- end ---

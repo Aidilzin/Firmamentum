@@ -1,0 +1,7 @@
+exit: 3
+--- output ---
+Run: <RUN>
+Error: planner: every entry is rate limited or cooling; try again after <WHEN>
+--- stderr ---
+Error: planner: every entry is rate limited or cooling; try again after <WHEN>
+--- end ---

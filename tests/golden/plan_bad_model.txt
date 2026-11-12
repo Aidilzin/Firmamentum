@@ -1,0 +1,6 @@
+exit: 2
+--- output ---
+Error: unknown role 'nobody' in --model; valid roles: planner, scout, builder, reviewer, repair
+--- stderr ---
+Error: unknown role 'nobody' in --model; valid roles: planner, scout, builder, reviewer, repair
+--- end ---

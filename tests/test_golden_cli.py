@@ -11,6 +11,7 @@ from test_executor import FILE_CMD, FakeBuilder, edit, env, fail, report  # noqa
 from test_phase4 import write_cfg
 
 from orch import budget, cli
+from orch.adapters.base import AgentResult, ErrorKind
 from orch.runs import load_meta, write_meta
 
 ENV_STEP = step("s1", files=["src/s1.py", ".env"])
@@ -195,3 +196,153 @@ def test_status_stale(g):
 
 def test_status_of_an_unknown_run(g):
     g[3]("status_unknown_run", invoke(["status", "nope", "--repo", "demo"]))
+
+
+# ---------- orch plan / run / answer (plan) ----------
+
+ASK = good_plan(needs_input=True, question="Which database?", steps=[])
+ONE = good_plan(steps=[step("s1")])
+
+
+def planner(structured, tokens=70, session="p"):
+    return lambda req: AgentResult(agent="claude", ok=True, error_kind=ErrorKind.OK, structured=structured,
+                                   session_id=session, total_tokens=tokens)  # fmt: skip
+
+
+def scout(text="A small Python package with a src layout.", tokens=30):
+    return lambda req: AgentResult(agent="agy", ok=True, error_kind=ErrorKind.OK, text=text, total_tokens=tokens)
+
+
+def fakes(monkeypatch, actions):
+    fb = FakeBuilder(actions)
+    monkeypatch.setattr(cli, "get_adapter", lambda name: fb)
+    return fb
+
+
+def cool_claude():
+    budget.record_cooldown("claude", "*", datetime.now(timezone.utc) + timedelta(hours=2), "5h limit")
+
+
+def only_run(repo):
+    (d,) = (repo / ".orch" / "runs").iterdir()
+    return d
+
+
+def test_plan_planned(g, monkeypatch):
+    fakes(monkeypatch, [planner(good_plan(), tokens=1234)])
+    g[3]("plan_planned", invoke(["plan", "Add a version command", "--repo", "demo"]))
+
+
+def test_plan_with_scout_and_model_overrides(g, monkeypatch):
+    fb = fakes(monkeypatch, [scout(), planner(good_plan())])
+    g[3]("plan_scout", invoke(["plan", "x y z", "--repo", "demo", "--scout", "--model", "planner=sonnet"]))
+    assert len(fb.requests) == 2
+
+
+def test_plan_needs_input(g, monkeypatch):
+    fakes(monkeypatch, [planner(ASK)])
+    g[3]("plan_needs_input", invoke(["plan", "add storage", "--repo", "demo"]))
+
+
+def test_plan_failed_twice(g, monkeypatch):
+    fb = fakes(monkeypatch, [planner(good_plan(steps=[])), planner(good_plan(steps=[]))])
+    g[3]("plan_failed", invoke(["plan", "bad one", "--repo", "demo"]))
+    assert len(fb.requests) == 2
+
+
+def test_plan_agent_error(g, monkeypatch):
+    fakes(monkeypatch, [fail()])
+    g[3]("plan_agent_error", invoke(["plan", "bad one", "--repo", "demo"]))
+
+
+def test_plan_paused(g, monkeypatch):
+    fb = fakes(monkeypatch, [])
+    cool_claude()
+    g[3]("plan_paused", invoke(["plan", "later", "--repo", "demo"]))
+    assert fb.requests == []
+
+
+def test_plan_bad_model_and_bad_repo(g, monkeypatch):
+    fb = fakes(monkeypatch, [])
+    g[3]("plan_bad_model", invoke(["plan", "x", "--repo", "demo", "--model", "nobody=x"]))
+    g[3]("plan_bad_repo", invoke(["plan", "x", "--repo", "no-such-repo-or-dir"]))
+    assert fb.requests == []
+
+
+def test_run_plans_and_executes_to_done(g, monkeypatch):
+    fb = fakes(monkeypatch, [planner(ONE), edit({"src/s1.py": "a = 1\n"})])
+    g[3]("run_done", invoke(["run", "do it", "--repo", "demo"]))
+    assert len(fb.requests) == 2 and load_meta(only_run(g[0]))["status"] == "done"
+
+
+def test_run_stops_at_a_step(g, monkeypatch):
+    fakes(monkeypatch, [planner(good_plan(steps=[ENV_STEP])), edit({"src/s1.py": "a = 1\n", ".env": "K=1\n"})])
+    g[3]("run_awaiting_approval", invoke(["run", "do it", "--repo", "demo"]))
+
+
+def test_run_plan_needs_input(g, monkeypatch):
+    fb = fakes(monkeypatch, [planner(ASK)])
+    g[3]("run_needs_input", invoke(["run", "add storage", "--repo", "demo"]))
+    assert len(fb.requests) == 1
+
+
+def test_run_planning_failed(g, monkeypatch):
+    fakes(monkeypatch, [fail()])
+    g[3]("run_planning_failed", invoke(["run", "bad one", "--repo", "demo"]))
+
+
+def test_run_planning_paused(g, monkeypatch):
+    fakes(monkeypatch, [])
+    cool_claude()
+    g[3]("run_planning_paused", invoke(["run", "later", "--repo", "demo"]))
+
+
+def test_run_refuses_a_bad_hidden_tests_dir_before_any_call(g, monkeypatch):
+    fb = fakes(monkeypatch, [])
+    g[3]("run_bad_hidden_tests", invoke(["run", "do it", "--repo", "demo", "--hidden-tests", str(g[0])]))
+    assert fb.requests == [] and not (g[0] / ".orch").exists()
+
+
+def test_run_refuses_a_repo_without_a_test_command(g, tmp_path, monkeypatch):
+    other = tmp_path / "unconfigured"
+    other.mkdir()
+    fb = fakes(monkeypatch, [])
+    g[3]("run_no_test_command", invoke(["run", "do it", "--repo", str(other)]))
+    assert fb.requests == [] and not (other / ".orch").exists()
+
+
+def _asked(g, monkeypatch, then):
+    """A stored plan that needs an answer; `then` are the planner's next replies."""
+    fb = fakes(monkeypatch, [planner(ASK), *then])
+    assert invoke(["plan", "add storage", "--repo", "demo"]).exit_code == 2
+    return fb, only_run(g[0])
+
+
+def test_answer_plan_gives_a_plan(g, monkeypatch):
+    fb, run_dir = _asked(g, monkeypatch, [planner(ONE)])
+    g[3]("answer_plan_planned", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
+    assert load_meta(run_dir)["status"] == "planned" and "Answer: sqlite" in fb.requests[1].prompt
+
+
+def test_answer_plan_asks_again(g, monkeypatch):
+    again = good_plan(needs_input=True, question="Which sqlite driver?", steps=[])
+    _, run_dir = _asked(g, monkeypatch, [planner(again)])
+    g[3]("answer_plan_needs_input", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
+
+
+def test_answer_plan_replan_fails(g, monkeypatch):
+    _, run_dir = _asked(g, monkeypatch, [fail()])
+    g[3]("answer_plan_failed", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
+
+
+def test_answer_plan_replan_is_rate_limited(g, monkeypatch):
+    _, run_dir = _asked(g, monkeypatch, [])
+    cool_claude()
+    g[3]("answer_plan_paused", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
+
+
+def test_answer_plan_that_is_not_waiting(g, monkeypatch):
+    fb, run_dir = _asked(g, monkeypatch, [])
+    (run_dir / "plan.json").write_text(json.dumps(ONE), encoding="utf-8")  # meta still says needs_input
+    g[3]("answer_plan_not_waiting", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
+    assert len(fb.requests) == 1

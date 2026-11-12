@@ -1,0 +1,6 @@
+exit: 2
+--- output ---
+Error: this repo has no test_command in config.yaml; refusing to run.
+--- stderr ---
+Error: this repo has no test_command in config.yaml; refusing to run.
+--- end ---

@@ -1,0 +1,6 @@
+exit: 2
+--- output ---
+Error: repo 'no-such-repo-or-dir' is neither a configured name nor an existing directory
+--- stderr ---
+Error: repo 'no-such-repo-or-dir' is neither a configured name nor an existing directory
+--- end ---

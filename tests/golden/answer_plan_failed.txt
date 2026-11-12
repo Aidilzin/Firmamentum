@@ -1,0 +1,7 @@
+exit: 1
+--- output ---
+Run: <RUN>
+Error: planner failed: AGENT_ERROR: nope
+--- stderr ---
+Error: planner failed: AGENT_ERROR: nope
+--- end ---

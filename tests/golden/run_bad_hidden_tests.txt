@@ -1,0 +1,6 @@
+exit: 2
+--- output ---
+Error: --hidden-tests <TMP>/proj is inside the target repo <TMP>/proj; keep it outside so the builder cannot see it
+--- stderr ---
+Error: --hidden-tests <TMP>/proj is inside the target repo <TMP>/proj; keep it outside so the builder cannot see it
+--- end ---

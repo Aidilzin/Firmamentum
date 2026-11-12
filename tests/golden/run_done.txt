@@ -1,0 +1,37 @@
+exit: 0
+--- output ---
+Run: <RUN>
+Goal: Add a version command
+Test command: uv run pytest -q
+Assumptions:
+  - package version comes from importlib.metadata
+
+1. [s1] Do s1
+   Change things for s1 because the request needs it.
+   depends on: none
+   files: src/s1.py
+   acceptance: tests for s1 pass
+   risk flags: none
+warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys; sys.exit(0)"'; using config
+[s1] Do s1: Maxwell (builder) building
+[s1] done <SHA>
+
+*  step 1 of 1 · done · Do s1
+* Laplace   planned 1 step              opus · 70
+# Maxwell   built 1 step                sonnet · 100
+
+Run: <RUN>  status: done  time: <T>
+Planning models: Laplace=claude:opus
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    done                     100  pass        0       -        <SHA>  <T>    Do s1
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+Run tokens: 170 total (Laplace=70, Maxwell=100)
+Needs from you:
+  orch diff <RUN> --repo demo   # review, then: orch merge <RUN> --repo demo
+
+Result: done
+Next: orch diff <RUN> --repo demo   # review, then: orch merge <RUN> --repo demo
+--- stderr ---
+--- end ---

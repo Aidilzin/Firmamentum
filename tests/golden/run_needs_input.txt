@@ -1,0 +1,11 @@
+exit: 2
+--- output ---
+Run: <RUN>
+Goal: Add a version command
+Test command: uv run pytest -q
+Assumptions:
+  - package version comes from importlib.metadata
+Question: Which database?
+Next: orch answer <RUN> "<your answer>" --repo demo   # the plan needs an answer
+--- stderr ---
+--- end ---

@@ -1,0 +1,6 @@
+exit: 2
+--- output ---
+Error: this run's plan is not waiting for an answer.
+--- stderr ---
+Error: this run's plan is not waiting for an answer.
+--- end ---

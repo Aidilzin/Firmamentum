@@ -1,0 +1,45 @@
+exit: 2
+--- output ---
+Run: <RUN>
+Goal: Add a version command
+Test command: uv run pytest -q
+Assumptions:
+  - package version comes from importlib.metadata
+
+1. [s1] Do s1
+   Change things for s1 because the request needs it.
+   depends on: none
+   files: src/s1.py, .env
+   acceptance: tests for s1 pass
+   risk flags: none
+warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys; sys.exit(0)"'; using config
+[s1] Do s1: Maxwell (builder) building
+
+[!]  step 1 of 1 · needs your approval · Do s1
+* Laplace   planned 1 step              opus · 70
+# Maxwell   built 1 step                sonnet · 100
+
+Run: <RUN>  status: awaiting_approval  time: <T>
+Planning models: Laplace=claude:opus
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    awaiting_approval        100  -           0       -        -         <T>    Do s1
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+      needs approval: touches_auth_payments_secrets_env ['.env']
+Run tokens: 170 total (Laplace=70, Maxwell=100)
+Needs from you:
+  orch approve <RUN> --step s1 --repo demo   # touches_auth_payments_secrets_env  (or: orch reject <RUN> --step s1 --repo demo)
+  orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+
+Result: awaiting_approval (s1): touches_auth_payments_secrets_env: .env
+Next: orch approve <RUN> --step s1 --repo demo   # touches_auth_payments_secrets_env  (or: orch reject <RUN> --step s1 --repo demo)
+Next: orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+
+--- STOPPED ---
+What happened: run awaiting_approval at step s1: touches_auth_payments_secrets_env: .env
+Why: rule touches_auth_payments_secrets_env; stage post_check; files .env
+Next: orch approve <RUN> --step s1 --repo demo   # touches_auth_payments_secrets_env  (or: orch reject <RUN> --step s1 --repo demo)
+Next: orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+--- stderr ---
+--- end ---
