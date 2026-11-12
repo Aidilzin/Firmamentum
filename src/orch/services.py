@@ -8,7 +8,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from .runs import is_stale
+from . import workspace
+from .config import ResolvedRepo
+from .merge import MergeError, MergeResult, merge_run
+from .runs import RunNotFound, is_stale, load_meta
 
 EXIT_CODES = {"done": 0, "failed": 1, "needs_input": 2, "awaiting_approval": 2, "paused": 3, "rejected": 1, "cancelled": 130}
 STOPPED_STATUSES = ("awaiting_approval", "needs_input", "failed")
@@ -109,3 +112,73 @@ def next_actions(meta: dict, run_dir: Path, repo_name: str | None = None) -> lis
     if meta.get("status") == "done" and not meta.get("merged_sha"):
         out.append(act("diff_run", reason="review", alt=act("merge")))
     return out
+
+
+# ---------- diff, merge, clean ----------
+
+
+@dataclass
+class DiffPart:
+    """One piece of a diff. `header` marks changes that are not committed yet (a stopped step)."""
+
+    text: str
+    header: str | None = None
+
+
+def _uncommitted_header(sid: str, st: dict) -> str:
+    return f"# step {sid} ({st.get('status')}): UNCOMMITTED changes in the worktree (git diff HEAD plus new files)\n"
+
+
+def diff_run(target: ResolvedRepo, run_dir: Path, step: str | None = None) -> list[DiffPart]:
+    """The diff of a run (base..branch, then the uncommitted change of each stopped step) or of one step."""
+    meta = load_meta(run_dir)
+    ex = meta.get("exec")
+    if not ex:
+        raise ServiceError("this run was never executed.")
+    steps: dict = meta.get("steps") or {}
+    wt = Path(ex["worktree"])
+    try:
+        if step:
+            s = steps.get(step)
+            if s is None:
+                raise ServiceError(f"no step {step!r}")
+            if s.get("commit"):
+                return [DiffPart(workspace.diff(target.path, f"{s['commit']}^", s["commit"]))]
+            if wt.is_dir():
+                return [DiffPart(workspace.diff_uncommitted(wt), _uncommitted_header(step, s))]
+            return [DiffPart(f"(step {step} has no commit)")]
+        parts = [DiffPart(workspace.diff(target.path, ex["base_sha"], ex["branch"]))]
+        for sid, s in steps.items():  # stopped steps have changes that are not committed yet
+            if s.get("status") in STOPPED_STATUSES and not s.get("commit") and wt.is_dir():
+                parts.append(DiffPart(workspace.diff_uncommitted(wt), _uncommitted_header(sid, s)))
+        return parts
+    except workspace.WorkspaceError as e:
+        raise ServiceError(str(e)) from e
+
+
+def merge(target: ResolvedRepo, run_dir: Path, allow_main: bool = False) -> MergeResult:
+    """Merge the run's branch into the current branch (--no-ff), then run the tests. Never pushes."""
+    try:
+        return merge_run(target, run_dir, allow_main=allow_main)
+    except (MergeError, workspace.WorkspaceError, RunNotFound) as e:
+        raise ServiceError(str(e)) from e
+
+
+@dataclass
+class CleanResult:
+    executed: bool  # False: the run never had a worktree
+    removed: bool = False
+    worktree: str | None = None
+    branch: str | None = None
+
+
+def clean_run(target: ResolvedRepo, run_dir: Path) -> CleanResult:
+    """Remove the run's worktree. The branch is kept."""
+    ex = load_meta(run_dir).get("exec")
+    if not ex:
+        return CleanResult(executed=False)
+    try:
+        removed = workspace.remove(target.path, ex["repo_name"], run_dir.name, Path(ex["worktree"]))
+    except workspace.WorkspaceError as e:
+        raise ServiceError(str(e)) from e
+    return CleanResult(True, removed, ex["worktree"], ex["branch"])

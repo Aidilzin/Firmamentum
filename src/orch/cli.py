@@ -22,17 +22,16 @@ from .adapters import AgentAdapter, AgentRequest, AntigravityAdapter, ClaudeCode
 from . import budget
 from .budget import run_agent, summary, summary_by_model
 from .config import ConfigError, apply_overrides, load_config, resolve_repo
-from . import versions, workspace
+from . import services, versions, workspace
 from .executor import ExecError, ExecOutcome, Executor, check_hidden_tests
 from .theme import current_theme, demon_label, demon_name, resolve_theme, set_theme
 from .ui import make_view, render_doctor, render_plain, render_rich
 from . import doctor as doctor_mod
 from . import home as home_mod
 from .view import build_run_view, duration, fmt_elapsed
-from .merge import MergeError, merge_run
 from .plan import format_plan
 from .planner import make_plan
-from .services import EXIT_CODES, STOPPED_STATUSES, next_actions
+from .services import EXIT_CODES, next_actions
 from .runs import RunNotFound, create_run, find_run, is_stale, list_runs, load_meta, load_plan, run_tokens, save_outcome, write_meta
 
 app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.")
@@ -277,6 +276,15 @@ def _find_or_exit(target, run_id: str) -> Path:
     except RunNotFound as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(1)
+
+
+def _or_exit(fn, *args, **kw):
+    """Call a service; print an expected refusal and exit with its code."""
+    try:
+        return fn(*args, **kw)
+    except services.ServiceError as e:
+        typer.echo(f"Error: {e.message}", err=True)
+        raise typer.Exit(e.code)
 
 
 def _load_cfg(model: list[str] | None):
@@ -604,12 +612,7 @@ def merge(
 ) -> None:
     """Merge the run's branch into the main repo's current branch (--no-ff), then run the tests. Never pushes."""
     target = _repo_or_exit(load_config(), repo)
-    run_dir = _find_or_exit(target, run_id)
-    try:
-        r = merge_run(target, run_dir, allow_main=allow_main)
-    except (MergeError, workspace.WorkspaceError, RunNotFound) as e:
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(1)
+    r = _or_exit(services.merge, target, _find_or_exit(target, run_id), allow_main=allow_main)
     typer.echo(f"Merged {r.branch} into {r.target} as {r.sha[:8]} (not pushed).")
     if r.tests_passed is None:
         typer.echo(f"Tests after merge: could not run ({r.tests_detail})")
@@ -654,10 +657,6 @@ def doctor(
     raise typer.Exit(doctor_mod.exit_code(checks))
 
 
-def _uncommitted_header(sid: str, st: dict) -> str:
-    return f"# step {sid} ({st.get('status')}): UNCOMMITTED changes in the worktree (git diff HEAD plus new files)\n"
-
-
 @app.command()
 def diff(
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
@@ -666,32 +665,8 @@ def diff(
 ) -> None:
     """Show the diff of a run (base..branch) or of one step."""
     target = _repo_or_exit(load_config(), repo)
-    meta = load_meta(_find_or_exit(target, run_id))
-    ex = meta.get("exec")
-    if not ex:
-        typer.echo("Error: this run was never executed.", err=True)
-        raise typer.Exit(1)
-    try:
-        if step:
-            s = (meta.get("steps") or {}).get(step)
-            if s is None:
-                typer.echo(f"Error: no step {step!r}", err=True)
-                raise typer.Exit(1)
-            if s.get("commit"):
-                typer.echo(workspace.diff(target.path, f"{s['commit']}^", s["commit"]))
-            elif Path(ex["worktree"]).is_dir():
-                typer.echo(_uncommitted_header(step, s) + workspace.diff_uncommitted(Path(ex["worktree"])))
-            else:
-                typer.echo(f"(step {step} has no commit)")
-        else:
-            typer.echo(workspace.diff(target.path, ex["base_sha"], ex["branch"]))
-            wt = Path(ex["worktree"])
-            for sid, s in (meta.get("steps") or {}).items():  # stopped steps have changes that are not committed yet
-                if s.get("status") in STOPPED_STATUSES and not s.get("commit") and wt.is_dir():
-                    typer.echo(_uncommitted_header(sid, s) + workspace.diff_uncommitted(wt))
-    except workspace.WorkspaceError as e:
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(1)
+    for part in _or_exit(services.diff_run, target, _find_or_exit(target, run_id), step):
+        typer.echo((part.header or "") + part.text)
 
 
 @app.command()
@@ -701,17 +676,13 @@ def clean(
 ) -> None:
     """Remove the run's worktree. The branch is kept."""
     target = _repo_or_exit(load_config(), repo)
-    d = _find_or_exit(target, run_id)
-    ex = load_meta(d).get("exec")
-    if not ex:
+    r = _or_exit(services.clean_run, target, _find_or_exit(target, run_id))
+    if not r.executed:
         typer.echo("Nothing to clean: the run was never executed.")
-        return
-    try:
-        removed = workspace.remove(target.path, ex["repo_name"], d.name, Path(ex["worktree"]))
-    except workspace.WorkspaceError as e:
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(1)
-    typer.echo(f"Removed worktree {ex['worktree']}; branch {ex['branch']} kept." if removed else "No worktree to remove.")
+    elif r.removed:
+        typer.echo(f"Removed worktree {r.worktree}; branch {r.branch} kept.")
+    else:
+        typer.echo("No worktree to remove.")
 
 
 if __name__ == "__main__":
