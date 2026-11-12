@@ -1,0 +1,8 @@
+exit: 1
+--- output ---
+Merged orch/<RUN> into work as <SHA> (not pushed).
+Tests after merge: FAIL (exit 1
+1 failed)
+The merge commit is kept. To undo it: git reset --hard <SHA>^ (on work).
+--- stderr ---
+--- end ---

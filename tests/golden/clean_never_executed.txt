@@ -1,0 +1,5 @@
+exit: 0
+--- output ---
+Nothing to clean: the run was never executed.
+--- stderr ---
+--- end ---

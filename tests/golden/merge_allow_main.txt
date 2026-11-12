@@ -1,0 +1,7 @@
+exit: 0
+--- output ---
+Merged orch/<RUN> into main as <SHA> (not pushed).
+Tests after merge: PASS (exit 0
+)
+--- stderr ---
+--- end ---

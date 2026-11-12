@@ -1,0 +1,12 @@
+exit: 0
+--- output ---
+diff --git a/src/s2.py b/src/s2.py
+new file mode 100644
+index <SHA>..<SHA>
+--- /dev/null
++++ b/src/s2.py
+@@ -0,0 +1 @@
++b = 2
+
+--- stderr ---
+--- end ---

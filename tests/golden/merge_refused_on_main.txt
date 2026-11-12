@@ -1,0 +1,6 @@
+exit: 1
+--- output ---
+Error: the current branch is 'main'; check out another branch or pass --allow-main
+--- stderr ---
+Error: the current branch is 'main'; check out another branch or pass --allow-main
+--- end ---

@@ -1,0 +1,5 @@
+exit: 0
+--- output ---
+Removed worktree <TMP>/orch-wt/demo/<RUN>; branch orch/<RUN> kept.
+--- stderr ---
+--- end ---

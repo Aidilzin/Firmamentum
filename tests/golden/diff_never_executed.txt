@@ -1,0 +1,6 @@
+exit: 1
+--- output ---
+Error: this run was never executed.
+--- stderr ---
+Error: this run was never executed.
+--- end ---

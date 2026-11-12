@@ -1,0 +1,6 @@
+exit: 1
+--- output ---
+Merged orch/<RUN> into work as <SHA> (not pushed).
+Tests after merge: could not run (test command could not run)
+--- stderr ---
+--- end ---

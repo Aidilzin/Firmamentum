@@ -1,0 +1,28 @@
+exit: 0
+--- output ---
+diff --git a/src/s1.py b/src/s1.py
+new file mode 100644
+index <SHA>..<SHA>
+--- /dev/null
++++ b/src/s1.py
+@@ -0,0 +1 @@
++a = 1
+
+# step s2 (awaiting_approval): UNCOMMITTED changes in the worktree (git diff HEAD plus new files)
+diff --git a/.env b/.env
+new file mode 100644
+index <SHA>..<SHA>
+--- /dev/null
++++ b/.env
+@@ -0,0 +1 @@
++K=1
+diff --git a/src/s2.py b/src/s2.py
+new file mode 100644
+index <SHA>..<SHA>
+--- /dev/null
++++ b/src/s2.py
+@@ -0,0 +1 @@
++b = 2
+
+--- stderr ---
+--- end ---

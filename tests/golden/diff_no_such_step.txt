@@ -1,0 +1,6 @@
+exit: 1
+--- output ---
+Error: no step 's9'
+--- stderr ---
+Error: no step 's9'
+--- end ---

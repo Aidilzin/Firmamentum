@@ -5,6 +5,7 @@ import signal
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from git_helpers import git
 from golden_helpers import check, invoke
 from plan_factory import good_plan, step
 from test_cancel import cancelled_result, cancels
@@ -446,3 +447,81 @@ def test_exec_cancelled_by_ctrl_c_then_resume(g, monkeypatch):
     g[3]("exec_cancelled", _exec(run_dir))
     fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n"})])
     g[3]("resume_after_cancel_done", invoke(["resume", run_dir.name, "--repo", "demo"]))
+
+
+# ---------- diff / merge / clean ----------
+
+FAIL_CMD = 'python -c "import sys; print(\'1 failed\'); sys.exit(1)"'
+
+
+def _done_run(g, monkeypatch):
+    run_dir, _ = g[1]()
+    fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n"}), edit({"src/s2.py": "b = 2\n"})])
+    assert _exec(run_dir).exit_code == 0
+    return run_dir
+
+
+def _stopped_run(g, monkeypatch):
+    run_dir, _ = g[1](plan=good_plan(steps=[step("s1"), ENV_STEP | {"id": "s2", "depends_on": ["s1"]}]))
+    fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n"}), edit({"src/s2.py": "b = 2\n", ".env": "K=1\n"})])
+    assert _exec(run_dir).exit_code == 2
+    return run_dir
+
+
+def test_diff_of_a_done_run(g, monkeypatch):
+    run_dir = _done_run(g, monkeypatch)
+    g[3]("diff_run", invoke(["diff", run_dir.name, "--repo", "demo"]))
+    g[3]("diff_step_committed", invoke(["diff", run_dir.name, "--step", "s2", "--repo", "demo"]))
+    g[3]("diff_no_such_step", invoke(["diff", run_dir.name, "--step", "s9", "--repo", "demo"]))
+
+
+def test_diff_of_a_stopped_run(g, monkeypatch):
+    run_dir = _stopped_run(g, monkeypatch)
+    g[3]("diff_run_with_stopped_step", invoke(["diff", run_dir.name, "--repo", "demo"]))
+    g[3]("diff_step_uncommitted", invoke(["diff", run_dir.name, "--step", "s2", "--repo", "demo"]))
+    g[3]("clean_removed", invoke(["clean", run_dir.name, "--repo", "demo"]))
+    g[3]("diff_step_without_commit", invoke(["diff", run_dir.name, "--step", "s2", "--repo", "demo"]))
+    g[3]("diff_run_after_clean", invoke(["diff", run_dir.name, "--repo", "demo"]))
+    g[3]("clean_worktree_gone", invoke(["clean", run_dir.name, "--repo", "demo"]))
+
+
+def test_diff_and_clean_of_a_run_that_was_never_executed(g, monkeypatch):
+    run_dir, _ = g[1]()
+    g[3]("diff_never_executed", invoke(["diff", run_dir.name, "--repo", "demo"]))
+    g[3]("clean_never_executed", invoke(["clean", run_dir.name, "--repo", "demo"]))
+    g[3]("diff_unknown_run", invoke(["diff", "nope", "--repo", "demo"]))
+    g[3]("clean_unknown_run", invoke(["clean", "nope", "--repo", "demo"]))
+
+
+def test_merge_passes(g, monkeypatch):
+    run_dir = _done_run(g, monkeypatch)
+    g[3]("merge_refused_on_main", invoke(["merge", run_dir.name, "--repo", "demo"]))
+    git(g[0], "checkout", "-q", "-b", "work")
+    g[3]("merge_pass", invoke(["merge", run_dir.name, "--repo", "demo"]))
+    g[3]("merge_already_merged", invoke(["merge", run_dir.name, "--repo", "demo"]))
+    g[3]("status_merged", invoke(["status", run_dir.name, "--repo", "demo"]))
+
+
+def test_merge_into_main_when_allowed(g, monkeypatch):
+    run_dir = _done_run(g, monkeypatch)
+    g[3]("merge_allow_main", invoke(["merge", run_dir.name, "--allow-main", "--repo", "demo"]))
+
+
+def test_merge_with_failing_tests_keeps_the_merge(g, tmp_path, monkeypatch):
+    run_dir = _done_run(g, monkeypatch)
+    git(g[0], "checkout", "-q", "-b", "work")
+    write_cfg(tmp_path, monkeypatch, g[0], test_command=FAIL_CMD)
+    g[3]("merge_tests_fail", invoke(["merge", run_dir.name, "--repo", "demo"]))
+
+
+def test_merge_when_the_tests_cannot_run(g, tmp_path, monkeypatch):
+    run_dir = _done_run(g, monkeypatch)
+    git(g[0], "checkout", "-q", "-b", "work")
+    write_cfg(tmp_path, monkeypatch, g[0], test_command="no-such-test-runner-xyz -q")
+    g[3]("merge_tests_could_not_run", invoke(["merge", run_dir.name, "--repo", "demo"]))
+
+
+def test_merge_of_a_run_that_is_not_done(g, monkeypatch):
+    run_dir = _stopped_run(g, monkeypatch)
+    g[3]("merge_not_done", invoke(["merge", run_dir.name, "--repo", "demo"]))
+    g[3]("merge_unknown_run", invoke(["merge", "nope", "--repo", "demo"]))

@@ -1,0 +1,6 @@
+exit: 1
+--- output ---
+Error: run is 'awaiting_approval', not fully done; finish it first (orch status <RUN>)
+--- stderr ---
+Error: run is 'awaiting_approval', not fully done; finish it first (orch status <RUN>)
+--- end ---

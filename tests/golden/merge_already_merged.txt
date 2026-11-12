@@ -1,0 +1,6 @@
+exit: 1
+--- output ---
+Error: run was already merged (<SHA>)
+--- stderr ---
+Error: run was already merged (<SHA>)
+--- end ---
