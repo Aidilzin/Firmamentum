@@ -1,0 +1,31 @@
+exit: 1
+--- output ---
+warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys; sys.exit(0)"'; using config
+[s1] Do s1: Maxwell (builder) building
+
+[x]  step 1 of 1 · failed · Do s1
+# Maxwell   built 1 step                sonnet · 0
+
+Run: <RUN>  status: failed  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    failed                     0  -           0       -        -         <T>    Do s1
+      tokens by role: Maxwell=0
+      models used: Maxwell=claude:sonnet
+      error: AGENT_ERROR: nope
+Run tokens: 0 total (Maxwell=0)
+Needs from you:
+  (step s1 failed: AGENT_ERROR: nope; see <TMP>/proj/.orch/runs/<RUN>/steps/s1; start a new run)
+  orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+
+Result: failed (s1): builder failed: AGENT_ERROR
+Next: (step s1 failed: AGENT_ERROR: nope; see <TMP>/proj/.orch/runs/<RUN>/steps/s1; start a new run)
+Next: orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+
+--- STOPPED ---
+What happened: run failed at step s1: builder failed: AGENT_ERROR
+Why: stage Maxwell (builder); error: AGENT_ERROR: nope
+Next: (step s1 failed: AGENT_ERROR: nope; see <TMP>/proj/.orch/runs/<RUN>/steps/s1; start a new run)
+Next: orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+--- stderr ---
+--- end ---

@@ -1,0 +1,6 @@
+exit: 2
+--- output ---
+Error: no step is awaiting approval
+--- stderr ---
+Error: no step is awaiting approval
+--- end ---

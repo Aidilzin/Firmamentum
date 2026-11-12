@@ -1,0 +1,32 @@
+exit: 130
+--- output ---
+warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys; sys.exit(0)"'; using config
+[s1] Do s1: Maxwell (builder) building
+
+.  step 1 of 1 · stopped by you · Do s1
+# Maxwell   built 1 step                sonnet · 0
+
+Run: <RUN>  status: cancelled  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    pending                    0  -           0       -        -         <T>    Do s1
+      tokens by role: Maxwell=0
+      models used: Maxwell=claude:sonnet
+      error: cancelled
+Run tokens: 0 total (Maxwell=0)
+Needs from you:
+  orch resume <RUN> --repo demo   # stopped by you
+
+Result: cancelled (s1): stopped by you; `orch resume` rebuilds the step
+Next: orch resume <RUN> --repo demo   # stopped by you
+
+--- STOPPED ---
+What happened: run cancelled at step s1: stopped by you; `orch resume` rebuilds the step
+Why: error: cancelled
+Next: orch resume <RUN> --repo demo   # stopped by you
+
+stopping the run (Ctrl-C again: stop now)
+--- stderr ---
+
+stopping the run (Ctrl-C again: stop now)
+--- end ---

@@ -1,0 +1,6 @@
+exit: 3
+--- output ---
+Run is paused until <WHEN> (usage limit). Use --force to try earlier.
+--- stderr ---
+Run is paused until <WHEN> (usage limit). Use --force to try earlier.
+--- end ---

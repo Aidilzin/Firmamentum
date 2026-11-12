@@ -1,0 +1,6 @@
+exit: 2
+--- output ---
+Error: this run was never started; use `orch exec`
+--- stderr ---
+Error: this run was never started; use `orch exec`
+--- end ---

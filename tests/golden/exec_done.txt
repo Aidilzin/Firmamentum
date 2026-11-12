@@ -1,0 +1,28 @@
+exit: 0
+--- output ---
+warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys; sys.exit(0)"'; using config
+[s1] Do s1: Maxwell (builder) building
+[s1] done <SHA>
+[s2] Do s2: Maxwell building
+[s2] done <SHA>
+
+*---*  step 2 of 2 · done · Do s2
+# Maxwell   built 2 steps               sonnet · 200
+
+Run: <RUN>  status: done  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    done                     100  pass        0       -        <SHA>  <T>    Do s1
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+s2    done                     100  pass        0       -        <SHA>  <T>    Do s2
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+Run tokens: 200 total (Maxwell=200)
+Needs from you:
+  orch diff <RUN> --repo demo   # review, then: orch merge <RUN> --repo demo
+
+Result: done
+Next: orch diff <RUN> --repo demo   # review, then: orch merge <RUN> --repo demo
+--- stderr ---
+--- end ---

@@ -1,0 +1,23 @@
+exit: 1
+--- output ---
+
+[x]  step 1 of 1 · rejected · Do s1
+# Maxwell   built 1 step                sonnet · 100
+
+Run: <RUN>  status: rejected  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    rejected                 100  -           0       -        -         <T>    Do s1
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+      needs approval: touches_auth_payments_secrets_env ['.env']
+Run tokens: 100 total (Maxwell=100)
+
+Result: rejected (s1): step s1 rejected by you; the run is stopped
+
+--- STOPPED ---
+What happened: run rejected at step s1: step s1 rejected by you; the run is stopped
+Why: rule touches_auth_payments_secrets_env; stage post_check; files .env
+Next: (nothing to do)
+--- stderr ---
+--- end ---

@@ -1,0 +1,31 @@
+exit: 2
+--- output ---
+warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys,pathlib; sys.exit(0 if pathlib.Path(\'ok.txt\').exists() else 1)"'; using config
+[s1] Do s1: Maxwell (builder) building
+
+[!]  step 1 of 1 · needs your approval · Do s1
+# Maxwell   built 1 step                sonnet · 100
+
+Run: <RUN>  status: awaiting_approval  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    awaiting_approval        100  FAIL(1)     0       -        -         <T>    Do s1
+      tokens by role: Maxwell=100
+      models used: Maxwell=claude:sonnet
+      needs approval: tests_fail_after_3_repairs after 0 repair round(s): tests still fail (see <TMP>/proj/.orch/runs/<RUN>/steps/s1/tests.txt)
+Run tokens: 100 total (Maxwell=100)
+Needs from you:
+  orch approve <RUN> --step s1 --retry --repo demo   # another set of repair rounds  (or: orch reject <RUN> --step s1 --repo demo)
+  orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+
+Result: awaiting_approval (s1): after 0 repair round(s): tests still fail (see <TMP>/proj/.orch/runs/<RUN>/steps/s1/tests.txt)
+Next: orch approve <RUN> --step s1 --retry --repo demo   # another set of repair rounds  (or: orch reject <RUN> --step s1 --repo demo)
+Next: orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+
+--- STOPPED ---
+What happened: run awaiting_approval at step s1: after 0 repair round(s): tests still fail (see <TMP>/proj/.orch/runs/<RUN>/steps/s1/tests.txt)
+Why: rule tests_fail_after_3_repairs; stage repairs_exhausted; after 0 repair round(s): tests still fail (see <TMP>/proj/.orch/runs/<RUN>/steps/s1/tests.txt)
+Next: orch approve <RUN> --step s1 --retry --repo demo   # another set of repair rounds  (or: orch reject <RUN> --step s1 --repo demo)
+Next: orch diff <RUN> --step s1 --repo demo   # the uncommitted change of this step
+--- stderr ---
+--- end ---

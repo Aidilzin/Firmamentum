@@ -1,0 +1,6 @@
+exit: 1
+--- output ---
+Error: no run 'nope' in <TMP>/proj/.orch/runs
+--- stderr ---
+Error: no run 'nope' in <TMP>/proj/.orch/runs
+--- end ---

@@ -1,0 +1,25 @@
+exit: 3
+--- output ---
+[s1] Do s1: Maxwell (builder) building
+
+.  step 1 of 1 · paused · Do s1
+
+Run: <RUN>  status: paused  time: <T>
+Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+Paused until <WHEN>
+step  status                tokens  tests       rounds  review   commit    time    title
+s1    pending                    0  -           0       -        -         <T>    Do s1
+      error: rate limited
+Run tokens: 0 total ()
+Needs from you:
+  orch resume <RUN> --repo demo   # after the usage limit resets
+
+Result: paused (s1): rate limited (builder); run paused, `orch resume` later after <WHEN>
+Next: orch resume <RUN> --repo demo   # after the usage limit resets
+
+--- STOPPED ---
+What happened: run paused at step s1: rate limited (builder); run paused, `orch resume` later after <WHEN>
+Why: error: rate limited; usage limit, resume after <ISO>
+Next: orch resume <RUN> --repo demo   # after the usage limit resets
+--- stderr ---
+--- end ---

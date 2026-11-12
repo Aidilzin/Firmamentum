@@ -1,14 +1,15 @@
 """Golden output of the one-shot commands (P5): the service-layer move must not change a byte. Fakes only."""
 
 import json
+import signal
 from datetime import datetime, timedelta, timezone
 
 import pytest
 from golden_helpers import check, invoke
 from plan_factory import good_plan, step
-from test_cancel import cancels
+from test_cancel import cancelled_result, cancels
 from test_executor import FILE_CMD, FakeBuilder, edit, env, fail, report  # noqa: F401  (env is a fixture)
-from test_phase4 import write_cfg
+from test_phase4 import issue, review, write_cfg
 
 from orch import budget, cli
 from orch.adapters.base import AgentResult, ErrorKind
@@ -346,3 +347,102 @@ def test_answer_plan_that_is_not_waiting(g, monkeypatch):
     (run_dir / "plan.json").write_text(json.dumps(ONE), encoding="utf-8")  # meta still says needs_input
     g[3]("answer_plan_not_waiting", invoke(["answer", run_dir.name, "sqlite", "--repo", "demo"]))
     assert len(fb.requests) == 1
+
+
+# ---------- exec / resume / approve / reject / answer --step ----------
+
+
+def _exec(run_dir, *extra):
+    return invoke(["exec", run_dir.name, "--repo", "demo", *extra])
+
+
+def test_exec_done(g, monkeypatch):
+    run_dir, _ = g[1]()
+    fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n"}), edit({"src/s2.py": "b = 2\n"})])
+    g[3]("exec_done", _exec(run_dir))
+    g[3]("exec_already_started", _exec(run_dir))
+
+
+def test_exec_with_review_and_a_repair_round(g, tmp_path, monkeypatch):
+    write_cfg(tmp_path, monkeypatch, g[0], review="per_step", max_repair_rounds=3)
+    run_dir, _ = one_step(g[1])
+    fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n"}), review("reject", [issue("major", problem="off by one")]),
+                        edit({"src/s1.py": "a = 2\n"}), review("approve", [issue("minor", problem="naming")])])  # fmt: skip
+    g[3]("exec_review_repair", _exec(run_dir))
+
+
+def test_exec_awaiting_approval_then_approve(g, monkeypatch):
+    run_dir, _ = g[1](plan=good_plan(steps=[ENV_STEP]))
+    fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n", ".env": "K=1\n"})])
+    g[3]("exec_awaiting_approval", _exec(run_dir))
+    g[3]("approve_done", invoke(["approve", run_dir.name, "--repo", "demo"]))
+    g[3]("approve_nothing_waiting", invoke(["approve", run_dir.name, "--repo", "demo"]))
+
+
+def test_exec_awaiting_approval_then_reject(g, monkeypatch):
+    run_dir, _ = g[1](plan=good_plan(steps=[ENV_STEP]))
+    fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n", ".env": "K=1\n"})])
+    assert _exec(run_dir).exit_code == 2
+    g[3]("reject", invoke(["reject", run_dir.name, "--step", "s1", "--repo", "demo"]))
+
+
+def test_exec_repairs_exhausted_then_approve_retry(g, tmp_path, monkeypatch):
+    write_cfg(tmp_path, monkeypatch, g[0], test_command=FILE_CMD)
+    run_dir, _ = one_step(g[1])
+    fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n"})])
+    g[3]("exec_repairs_exhausted", _exec(run_dir))
+    g[3]("approve_retry", invoke(["approve", run_dir.name, "--step", "s1", "--retry", "--repo", "demo"]))
+
+
+def test_exec_needs_input_then_answer_step(g, monkeypatch):
+    run_dir, _ = one_step(g[1])
+    fb = fakes(monkeypatch, [edit(rep=report(blocked=True, question="Which db?")), edit({"src/s1.py": "db = 1\n"})])
+    g[3]("exec_needs_input", _exec(run_dir))
+    g[3]("answer_step_done", invoke(["answer", run_dir.name, "use sqlite", "--step", "s1", "--repo", "demo"]))
+    assert "use sqlite" in fb.requests[1].prompt
+
+
+def test_answer_for_a_run_that_waits_for_nothing(g, monkeypatch):
+    run_dir, _ = one_step(g[1])
+    fb = fakes(monkeypatch, [])
+    g[3]("answer_nothing_waiting", invoke(["answer", run_dir.name, "use sqlite", "--repo", "demo"]))
+    assert fb.requests == []
+
+
+def test_exec_failed(g, monkeypatch):
+    run_dir, _ = one_step(g[1])
+    fakes(monkeypatch, [fail()])
+    g[3]("exec_failed", _exec(run_dir))
+
+
+def test_exec_unknown_run(g, monkeypatch):
+    fakes(monkeypatch, [])
+    g[3]("exec_unknown_run", invoke(["exec", "nope", "--repo", "demo"]))
+
+
+def test_exec_paused_then_resume(g, monkeypatch):
+    run_dir, _ = one_step(g[1])
+    fb = fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n"})])
+    cool_claude()
+    g[3]("exec_paused", _exec(run_dir))
+    g[3]("resume_refused_until", invoke(["resume", run_dir.name, "--repo", "demo"]))
+    g[3]("resume_force_still_paused", invoke(["resume", run_dir.name, "--repo", "demo", "--force"]))
+    assert fb.requests == []
+    budget.clear_cooldowns()
+    g[3]("resume_force_done", invoke(["resume", run_dir.name, "--repo", "demo", "--force"]))
+    assert len(fb.requests) == 1
+
+
+def test_exec_cancelled_by_ctrl_c_then_resume(g, monkeypatch):
+    run_dir, _ = one_step(g[1])
+
+    class Presses(FakeBuilder):
+        def run(self, request):
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)  # the user presses Ctrl-C once
+            return cancelled_result()
+
+    fb = Presses([])
+    monkeypatch.setattr(cli, "get_adapter", lambda name: fb)
+    g[3]("exec_cancelled", _exec(run_dir))
+    fakes(monkeypatch, [edit({"src/s1.py": "a = 1\n"})])
+    g[3]("resume_after_cancel_done", invoke(["resume", run_dir.name, "--repo", "demo"]))
