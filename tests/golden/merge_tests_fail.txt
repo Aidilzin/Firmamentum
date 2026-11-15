@@ -1,9 +1,11 @@
 exit: 1
 --- output ---
-Merged orch/<RUN> into work as <SHA> (not pushed).
-Note: the tests after the merge still run on this machine, not in the sandbox (sandbox Phase 3).
-Tests after merge: FAIL (exit 1
+testing the merge result; work is not touched until the tests pass
+Tests on the merge result: FAIL (exit 1
 1 failed)
-The merge commit is kept. To undo it: git reset --hard <SHA>^ (on work).
+Nothing was merged; work is still at <SHA>.
+Full test output: <TMP>/proj/.orch/runs/<RUN>/merge-tests.txt
+To merge anyway: read `orch diff <RUN>` first, then `git merge --no-ff orch/<RUN>`. That manual merge runs this repo's git hooks on this machine.
 --- stderr ---
+testing the merge result; work is not touched until the tests pass
 --- end ---

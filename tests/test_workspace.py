@@ -163,21 +163,6 @@ def test_commit_does_not_run_repo_hooks(repo, tmp_path):
     assert sha and not marker.exists()
 
 
-def test_merge_does_not_run_repo_hooks(repo, tmp_path):
-    wt = workspace.create(repo, "proj", "run1")
-    (wt.path / "a.py").write_text("a = 1\n", encoding="utf-8")
-    workspace.commit_step(wt.path, "s1", "A", ["a.py"])
-    marker = tmp_path / "merge-hook-ran.txt"
-    hooks = _hook(repo, "pre-merge-commit", marker)
-    git(repo, "config", "core.hooksPath", str(hooks))
-    git(repo, "checkout", "-q", "-b", "side")
-    (repo / "b.py").write_text("b = 1\n", encoding="utf-8")
-    git(repo, "add", "-A")
-    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "side change")
-    workspace.merge_no_ff(repo, "orch/run1", "merge")  # a real merge commit, so pre-merge-commit would fire
-    assert not marker.exists()
-
-
 # ---------- export_tree ----------
 
 

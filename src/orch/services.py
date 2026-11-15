@@ -175,10 +175,13 @@ def diff_run(target: ResolvedRepo, run_dir: Path, step: str | None = None) -> li
         raise ServiceError(str(e)) from e
 
 
-def merge(target: ResolvedRepo, run_dir: Path, allow_main: bool = False) -> MergeResult:
-    """Merge the run's branch into the current branch (--no-ff), then run the tests. Never pushes."""
+def merge(
+    target: ResolvedRepo, run_dir: Path, allow_main: bool = False, *, log: Callable[[str], None] = lambda m: None,
+    cancel: threading.Event | None = None,
+) -> MergeResult:  # fmt: skip
+    """Build the merge result, test it, and move the current branch only if the tests pass. Never pushes."""
     try:
-        return merge_run(target, run_dir, allow_main=allow_main)
+        return merge_run(target, run_dir, allow_main=allow_main, log=log, cancel=cancel)
     except (MergeError, workspace.WorkspaceError, RunNotFound) as e:
         raise ServiceError(str(e)) from e
 

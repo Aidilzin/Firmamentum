@@ -535,16 +535,32 @@ def done_run(env, tmp_path, monkeypatch):
     return repo, run_dir, rr
 
 
+def _worktrees(repo):
+    return [ln for ln in git(repo, "worktree", "list", "--porcelain").splitlines() if ln.startswith("worktree ")]
+
+
 def test_merge_success_no_ff_never_pushes(done_run):
     repo, run_dir, rr = done_run
+    before = git(repo, "rev-parse", "HEAD").strip()
     r = merge_run(rr, run_dir)
-    assert r.target == "work" and r.tests_passed is True
+    assert r.outcome == "merged" and r.target == "work" and r.tests_passed is True and r.target_sha == before
     assert git(repo, "log", "-1", "--format=%s").strip() == "Merge orch run: do the thing"
-    assert len(git(repo, "log", "-1", "--format=%P").split()) == 2  # a real merge commit
-    assert (repo / "src" / "s1.py").is_file() and load_meta(run_dir)["merged_sha"] == r.sha
+    assert git(repo, "log", "-1", "--format=%P").split() == [before, git(repo, "rev-parse", r.branch).strip()]
+    assert (repo / "src" / "s1.py").is_file() and load_meta(run_dir)["merged_sha"] == r.sha == git(repo, "rev-parse", "HEAD").strip()
     assert git(repo, "remote").strip() == ""
+    assert not any("merge-" in w for w in _worktrees(repo))  # the temporary worktree is gone
+    assert r.tests_file == run_dir / "merge-tests.txt" and "[exit 0]" in r.tests_file.read_text(encoding="utf-8")
     with pytest.raises(MergeError, match="already merged"):
         merge_run(rr, run_dir)
+
+
+def test_the_tests_run_on_a_copy_of_the_merge_result_not_in_your_checkout(done_run, isolated_worktree_root):
+    repo, run_dir, rr = done_run
+    rr = rr.model_copy(update={"test_command": 'python -c "import os; print(os.getcwd()); print(sorted(os.listdir()))"'})
+    r = merge_run(rr, run_dir)
+    text = r.tests_file.read_text(encoding="utf-8")
+    assert str(isolated_worktree_root) in text and str(repo) not in text.replace(str(isolated_worktree_root), "")
+    assert "'s1.py'" in text or "src" in text  # the candidate holds the branch's change
 
 
 def test_merge_refusals(env, done_run, tmp_path):
@@ -574,11 +590,64 @@ def test_merge_into_main_with_allow_main(done_run):
     assert merge_run(rr, run_dir, allow_main=True).target == "main"
 
 
-def test_merge_reports_failing_tests_but_keeps_the_merge(done_run):
+def test_failing_tests_merge_nothing(done_run):
     repo, run_dir, rr = done_run
-    rr = rr.model_copy(update={"test_command": 'python -c "import sys; sys.exit(1)"'})
+    rr = rr.model_copy(update={"test_command": 'python -c "import sys; print(\'1 failed\'); sys.exit(1)"'})
+    before, status = git(repo, "rev-parse", "HEAD"), git(repo, "status", "--porcelain=v1", "--branch")
     r = merge_run(rr, run_dir)
-    assert r.tests_passed is False and load_meta(run_dir)["merged_sha"]
+    assert r.outcome == "tests_failed" and r.tests_passed is False and r.sha == "" and "1 failed" in r.tests_detail
+    assert git(repo, "rev-parse", "HEAD") == before and git(repo, "status", "--porcelain=v1", "--branch") == status
+    assert not (repo / "src" / "s1.py").exists() and "merged_sha" not in load_meta(run_dir)
+    assert not any("merge-" in w for w in _worktrees(repo))
+    assert "1 failed" in r.tests_file.read_text(encoding="utf-8")
+
+
+def test_a_timeout_counts_as_a_failure_and_a_missing_command_as_could_not_run(done_run, monkeypatch):
+    repo, run_dir, rr = done_run
+    r = merge_run(rr.model_copy(update={"test_command": "no-such-test-runner-xyz -q"}), run_dir)
+    assert r.outcome == "cannot_run" and r.tests_passed is None and r.sha == ""
+    from orch import merge as merge_mod
+    from orch.adapters.process import ProcessOutput
+
+    monkeypatch.setattr(merge_mod, "run_process", lambda *a, **k: ProcessOutput(timed_out=True))
+    r = merge_run(rr, run_dir)
+    assert r.outcome == "tests_failed" and "timed out" in r.tests_detail
+    assert git(repo, "log", "-1", "--format=%s").strip() == "init"
+
+
+def test_a_conflict_stops_before_any_test(done_run):
+    repo, run_dir, rr = done_run
+    ex = load_meta(run_dir)["exec"]
+    wt_file = Path(ex["worktree"]) / "src" / "s1.py"
+    git(repo, "checkout", "-q", "-b", "other", ex["base_sha"])
+    (repo / "src").mkdir(exist_ok=True)
+    (repo / "src" / "s1.py").write_text("a = 2\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "other side")
+    assert wt_file.name == "s1.py"
+    with pytest.raises(MergeError, match=r"conflict in: src/s1.py.*Nothing was changed"):
+        merge_run(rr, run_dir)
+    assert git(repo, "log", "-1", "--format=%s").strip() == "other side" and not (run_dir / "merge-tests.txt").exists()
+
+
+def test_a_branch_that_is_already_in_the_target_is_recorded_without_tests(done_run):
+    repo, run_dir, rr = done_run
+    branch = load_meta(run_dir)["exec"]["branch"]
+    git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "merge", "-q", "--no-ff", "-m", "by hand", branch)
+    head = git(repo, "rev-parse", "HEAD").strip()
+    rr = rr.model_copy(update={"test_command": 'python -c "import sys; sys.exit(1)"'})  # would fail if it ran
+    r = merge_run(rr, run_dir)
+    assert r.outcome == "already" and r.sha == head and load_meta(run_dir)["merged_sha"] == head
+
+
+def test_a_checkout_that_changed_during_the_tests_is_not_merged(done_run):
+    repo, run_dir, rr = done_run
+    touch = (repo / "mine.txt").as_posix()
+    rr = rr.model_copy(update={"test_command": f"python -c \"open('{touch}', 'w').write('x')\""})
+    before = git(repo, "rev-parse", "HEAD")
+    with pytest.raises(MergeError, match="changed while the tests ran"):
+        merge_run(rr, run_dir)
+    assert git(repo, "rev-parse", "HEAD") == before and "merged_sha" not in load_meta(run_dir)
 
 
 def test_cli_merge(done_run, tmp_path, monkeypatch):
@@ -591,7 +660,7 @@ def test_cli_merge(done_run, tmp_path, monkeypatch):
     git(repo, "checkout", "-q", "work")
     r = runner.invoke(cli.app, ["merge", run_dir.name, "--repo", "demo"])
     assert r.exit_code == 0, r.output
-    assert "not pushed" in r.output and "Tests after merge: PASS" in r.output
+    assert "not pushed" in r.output and "Tests on the merge result: PASS" in r.output
 
 
 # ---------- environment ----------

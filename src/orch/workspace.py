@@ -310,16 +310,6 @@ def branch_exists(repo: Path, branch: str) -> bool:
     return git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}", check=False).returncode == 0
 
 
-def merge_no_ff(repo: Path, branch: str, message: str) -> str:
-    """`git merge --no-ff` into the current branch. On conflict the merge is aborted and WorkspaceError raised."""
-    repo = Path(repo)
-    p = git(repo, *_no_hooks_args(), *_identity_args(repo), "merge", "--no-ff", "-m", message, branch, check=False)
-    if p.returncode != 0:
-        git(repo, "merge", "--abort", check=False)
-        raise WorkspaceError(f"merge of {branch} failed and was aborted: {(p.stderr or p.stdout).strip()[:500]}")
-    return git(repo, "rev-parse", "HEAD").stdout.strip()
-
-
 # ---------- merge candidate: build and test the merge result before the branch moves ----------
 
 MIN_GIT = (2, 38)  # `git merge-tree --write-tree`

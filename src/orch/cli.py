@@ -39,7 +39,6 @@ from .runs import RunNotFound, find_run, is_stale, list_runs, load_meta, load_pl
 
 app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.")
 
-MERGE_NOTE = "Note: the tests after the merge still run on this machine, not in the sandbox (sandbox Phase 3)."
 
 
 class AgentName(str, Enum):
@@ -607,19 +606,30 @@ def merge(
     allow_main: bool = typer.Option(False, "--allow-main", help="Allow merging into main/master."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
 ) -> None:
-    """Merge the run's branch into the main repo's current branch (--no-ff), then run the tests. Never pushes."""
+    """Test the merge result first, then merge the run's branch (--no-ff) into the current branch only if the tests pass.
+    On a failure your branch and working tree are untouched. Never pushes."""
     target = _repo_or_exit(ctx.obj, repo)
-    r = _or_exit(services.merge, target, _find_or_exit(target, run_id), allow_main=allow_main)
+    run_dir = _find_or_exit(target, run_id)
+    r = _or_exit(services.merge, target, run_dir, allow_main=allow_main, log=lambda m: typer.echo(m, err=True))
+    if r.outcome == "already":
+        typer.echo(f"{r.branch} is already part of {r.target}; recorded {r.sha[:8]}. No tests were run.")
+        return
+    if r.outcome == "cancelled":
+        typer.echo(f"Stopped by you. Nothing was merged; {r.target} is still at {r.target_sha[:8]}.", err=True)
+        raise typer.Exit(130)
+    if r.outcome == "cannot_run":
+        typer.echo(f"Tests on the merge result: could not run ({r.tests_detail}). Nothing was merged.", err=True)
+        raise typer.Exit(2)
+    if r.outcome == "tests_failed":
+        typer.echo(f"Tests on the merge result: FAIL ({r.tests_detail})")
+        typer.echo(f"Nothing was merged; {r.target} is still at {r.target_sha[:8]}.")
+        if r.tests_file:
+            typer.echo(f"Full test output: {r.tests_file}")
+        typer.echo(f"To merge anyway: read `orch diff {run_dir.name}` first, then `git merge --no-ff {r.branch}`. "
+                   "That manual merge runs this repo's git hooks on this machine.")  # fmt: skip
+        raise typer.Exit(1)
+    typer.echo(f"Tests on the merge result: PASS ({r.tests_detail})")
     typer.echo(f"Merged {r.branch} into {r.target} as {r.sha[:8]} (not pushed).")
-    if target.sandbox == "docker":
-        typer.echo(MERGE_NOTE)
-    if r.tests_passed is None:
-        typer.echo(f"Tests after merge: could not run ({r.tests_detail})")
-        raise typer.Exit(1)
-    typer.echo(f"Tests after merge: {'PASS' if r.tests_passed else 'FAIL'} ({r.tests_detail})")
-    if not r.tests_passed:
-        typer.echo(f"The merge commit is kept. To undo it: git reset --hard {r.sha}^ (on {r.target}).")
-        raise typer.Exit(1)
 
 
 @app.command()

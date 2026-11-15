@@ -1,10 +1,17 @@
-"""`orch merge`: merge a finished run's branch into the main repo's current branch. Never pushes."""
+"""`orch merge`: merge a finished run's branch into the main repo's current branch. Never pushes.
+
+The merge result is built first without touching your checkout (`git merge-tree` + `git commit-tree`), the tests run on a
+throwaway worktree of that candidate commit, and the branch moves (`git merge --ff-only`) only if they pass. A failing run
+leaves your branch and working tree exactly as they were (docs/sandbox-design.md, Phase 3).
+"""
 
 from __future__ import annotations
 
 import shlex
+import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable, Literal
 
 from . import workspace
 from .adapters.process import child_env, run_process
@@ -13,6 +20,9 @@ from .runs import load_meta, write_meta
 
 PROTECTED_BRANCHES = ("main", "master")
 TEST_TIMEOUT_S = 10 * 60
+TESTS_FILE = "merge-tests.txt"
+
+Outcome = Literal["merged", "already", "tests_failed", "cannot_run", "cancelled"]
 
 
 class MergeError(RuntimeError):
@@ -23,9 +33,23 @@ class MergeError(RuntimeError):
 class MergeResult:
     branch: str
     target: str
-    sha: str
-    tests_passed: bool | None  # None = could not run
+    sha: str  # the commit the target branch is at because of this merge; "" when nothing was merged
+    tests_passed: bool | None  # None = could not run (or not run at all)
     tests_detail: str
+    outcome: Outcome = "merged"
+    target_sha: str = ""  # where the target branch was (and, unless merged, still is)
+    tests_file: Path | None = None
+
+
+@dataclass
+class TestOutcome:
+    kind: Literal["ran", "timed_out", "cannot_run", "cancelled"]
+    exit_code: int | None
+    text: str  # what is written to merge-tests.txt
+    detail: str  # one short reason or the tail of the output
+
+
+TestOutcome.__test__ = False  # not a pytest class, whatever module imports it
 
 
 def short_request(run_dir: Path, max_len: int = 60) -> str:
@@ -36,7 +60,32 @@ def short_request(run_dir: Path, max_len: int = 60) -> str:
     return first if len(first) <= max_len else first[: max_len - 1].rstrip() + "…"
 
 
-def merge_run(repo: ResolvedRepo, run_dir: Path, allow_main: bool = False) -> MergeResult:
+def _tail(text: str, n: int = 15) -> str:
+    return "\n".join(text.strip().splitlines()[-n:])
+
+
+def _run_on_host(repo: ResolvedRepo, argv: list[str], command: str, folder: Path, cancel: threading.Event | None) -> TestOutcome:
+    out = run_process(argv, cwd=folder, env=child_env(passthrough=repo.env_passthrough), timeout_s=TEST_TIMEOUT_S, cancel=cancel)
+    text = f"$ {command}\n[exit {out.returncode}]\n{out.stdout}\n--- stderr ---\n{out.stderr}\n"
+    if out.cancelled:
+        return TestOutcome("cancelled", None, text, "cancelled")
+    if out.timed_out:
+        return TestOutcome("timed_out", None, text + "\n[timed out]\n", "timed out")
+    if out.not_found or out.returncode is None:
+        return TestOutcome("cannot_run", None, text, "test command could not run")
+    tail = _tail(out.stdout + out.stderr)
+    return TestOutcome("ran", out.returncode, text, f"exit {out.returncode}" + (f"\n{tail}" if tail else ""))
+
+
+def _run_tests(repo: ResolvedRepo, argv: list[str], command: str, folder: Path, run_id: str,
+               cancel: threading.Event | None, log: Callable[[str], None]) -> TestOutcome:  # fmt: skip
+    return _run_on_host(repo, argv, command, folder, cancel)
+
+
+def merge_run(
+    repo: ResolvedRepo, run_dir: Path, allow_main: bool = False, *, log: Callable[[str], None] = lambda m: None,
+    cancel: threading.Event | None = None,
+) -> MergeResult:  # fmt: skip
     meta = load_meta(run_dir)
     ex = meta.get("exec")
     if meta.get("status") != "done" or not ex:
@@ -56,17 +105,65 @@ def merge_run(repo: ResolvedRepo, run_dir: Path, allow_main: bool = False) -> Me
         raise MergeError("the main repo is on a detached HEAD; check out a branch first")
     if target in PROTECTED_BRANCHES and not allow_main:
         raise MergeError(f"the current branch is {target!r}; check out another branch or pass --allow-main")
-    sha = workspace.merge_no_ff(path, branch, f"Merge orch run: {short_request(run_dir)}")
-    meta["merged_sha"] = sha
-    meta["merged_into"] = target
-    write_meta(run_dir, meta)
-
     try:
         argv = shlex.split(repo.test_command)
     except ValueError as e:
-        return MergeResult(branch, target, sha, None, f"bad test_command: {e}")
-    out = run_process(argv, cwd=path, env=child_env(passthrough=repo.env_passthrough), timeout_s=TEST_TIMEOUT_S)
-    if out.not_found or out.timed_out or out.returncode is None:
-        return MergeResult(branch, target, sha, None, "timed out" if out.timed_out else "test command could not run")
-    tail = "\n".join((out.stdout + out.stderr).strip().splitlines()[-15:])
-    return MergeResult(branch, target, sha, out.returncode == 0, f"exit {out.returncode}" + (f"\n{tail}" if tail else ""))
+        raise MergeError(f"bad test_command: {e}") from e
+
+    target_sha = workspace.commit_sha(path, "HEAD")
+    branch_sha = workspace.commit_sha(path, f"refs/heads/{branch}")
+
+    def record(sha: str) -> None:
+        meta["merged_sha"] = sha
+        meta["merged_into"] = target
+        write_meta(run_dir, meta)
+
+    if workspace.is_ancestor(path, branch_sha, target_sha):  # merged by hand, or orch died before it wrote meta.json
+        record(target_sha)
+        return MergeResult(branch, target, target_sha, None, "the branch is already part of the current branch; no tests run",
+                           "already", target_sha)  # fmt: skip
+
+    try:
+        candidate = workspace.merge_candidate(path, target_sha, branch_sha, f"Merge orch run: {short_request(run_dir)}")
+    except workspace.MergeConflict as e:
+        raise MergeError(f"{e}. Nothing was changed.") from e
+
+    repo_name = ex.get("repo_name") or repo.name or path.name
+    tmp_name = f"merge-{run_dir.name}"
+    leftover = workspace.merge_worktree_path(repo_name, tmp_name)
+    if leftover.exists():  # a merge that was killed hard
+        try:
+            workspace.remove(path, repo_name, tmp_name, path=leftover)
+        except workspace.WorkspaceError as e:
+            raise MergeError(f"a leftover folder of an earlier merge is in the way ({e}); remove it by hand") from e
+    tmp = workspace.add_detached(path, repo_name, tmp_name, candidate)
+    try:
+        log(f"testing the merge result; {target} is not touched until the tests pass")
+        res = _run_tests(repo, argv, repo.test_command, workspace._guard(tmp, path), run_dir.name, cancel, log)
+        tests_file = run_dir / TESTS_FILE
+        tests_file.write_text(res.text, encoding="utf-8")
+    finally:
+        try:
+            workspace.remove(path, repo_name, tmp_name, path=tmp)
+        except workspace.WorkspaceError as e:
+            log(f"warning: could not remove the temporary worktree {tmp}: {e}")
+
+    def stopped(outcome: Outcome, passed: bool | None) -> MergeResult:
+        return MergeResult(branch, target, "", passed, res.detail, outcome, target_sha, tests_file)
+
+    if res.kind == "cancelled":
+        return stopped("cancelled", None)
+    if res.kind == "cannot_run":
+        return stopped("cannot_run", None)
+    if res.kind == "timed_out" or res.exit_code != 0:
+        return stopped("tests_failed", False)
+
+    # The tests passed. Look once more at the checkout: you may have worked in it meanwhile.
+    if workspace.current_branch(path) != target or not workspace.is_clean(path):
+        raise MergeError(f"{path} changed while the tests ran (branch or uncommitted files); nothing was merged. Run it again.")
+    try:
+        workspace.fast_forward(path, candidate)
+    except workspace.WorkspaceError as e:
+        raise MergeError(f"{e}. The branch moved while the tests ran; nothing was merged. Run it again.") from e
+    record(candidate)
+    return MergeResult(branch, target, candidate, True, res.detail, "merged", target_sha, tests_file)
