@@ -708,7 +708,8 @@ def sandbox_check(
         return
     try:
         argv = sandbox_mod.test_argv(sandbox_mod.Spec.for_repo(target, cfg.sandbox), target.path, shlex.split(target.test_command),
-                                     "dry-run", sandbox_mod.venv_volume_name(target.path, st.image_id), target.env_passthrough)  # fmt: skip
+                                     "dry-run", sandbox_mod.venv_volume_name(target.path, st.image_id), target.env_passthrough,
+                                     name="orch-dry-run")  # fmt: skip
     except (sandbox_mod.SandboxError, ValueError) as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)

@@ -1,5 +1,7 @@
 """orch.sandbox: argv builders, probe cache, fail-closed `require`. No Docker is ever started."""
 
+import re
+
 import pytest
 
 from orch import sandbox
@@ -32,11 +34,27 @@ def test_argv_is_closed_by_default(tmp_path):
     assert pairs(a, "--user") == ["1000:1000"]
     assert pairs(a, "--cap-drop") == ["ALL"]
     assert pairs(a, "--security-opt") == ["no-new-privileges"]
-    assert "--read-only" in a and "--rm" in a
+    assert "--read-only" in a
+    assert "--rm" not in a  # the stopped container stays so `docker inspect` can say why it stopped
     assert pairs(a, "--label") == ["orch.run=run-1"]
     assert pairs(a, "--pids-limit") == ["512"]
     assert pairs(a, "--memory") == ["4g"] and pairs(a, "--cpus") == ["4"]
     assert "--privileged" not in a and "--env-file" not in a and "--network=host" not in a
+
+
+def test_the_container_has_a_unique_name_for_inspect(tmp_path):
+    a = sandbox.test_argv(SPEC, tmp_path, ["pytest"], "run-1", "orch-venv-abc")
+    b = sandbox.test_argv(SPEC, tmp_path, ["pytest"], "run-1", "orch-venv-abc")
+    (na,), (nb,) = pairs(a, "--name"), pairs(b, "--name")
+    assert re.fullmatch(r"orch-run-1-[0-9a-f]{8}", na) and na != nb
+    assert pairs(sandbox.test_argv(SPEC, tmp_path, ["pytest"], "r", "v", name="orch-x"), "--name") == ["orch-x"]
+    assert pairs(sandbox.warm_argv(SPEC, tmp_path, "r", "v", name="orch-w"), "--name") == ["orch-w"]
+
+
+@pytest.mark.parametrize("name", ["", "-x", "a b", "a,b", "a=b"])
+def test_bad_container_names_are_refused(tmp_path, name):
+    with pytest.raises(SandboxError):
+        sandbox.test_argv(SPEC, tmp_path, ["pytest"], "r", "orch-venv-abc", name=name)
 
 
 def test_source_and_venv_are_read_only_mounts_and_nothing_else_is_mounted(tmp_path):

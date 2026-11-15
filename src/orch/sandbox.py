@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import hashlib
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from .adapters.process import ProcessOutput, child_env, run_process
 from .config import ResolvedRepo, SandboxConfig
@@ -32,6 +33,7 @@ _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _IMAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*")
 _VOLUME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_CONTAINER_ID = re.compile(r"[0-9a-f]{6,64}")
 _BAD_MOUNT_CHARS = set(',"\'\n\r\0')  # `--mount` is a comma separated list; these would let a path add options
 
 
@@ -82,9 +84,16 @@ def _passthrough(names: tuple[str, ...] | list[str]) -> list[str]:
     return out
 
 
-def _hardening(spec: Spec, run_id: str) -> list[str]:
+def container_name(run_id: str) -> str:
+    """`orch-<run id>-<8 hex>`: unique per container, so `docker inspect` can ask about exactly this one."""
+    return f"orch-{_check(run_id, _RUN_ID, 'run id')}-{secrets.token_hex(4)}"
+
+
+def _hardening(spec: Spec, run_id: str, name: str) -> list[str]:
+    # No `--rm`: the stopped container must still exist after the run so `docker inspect` can say why it stopped
+    # (exit code, out of memory, never started). `sweep` removes it afterwards.
     return [
-        "--rm", "--label", f"{RUN_LABEL}={_check(run_id, _RUN_ID, 'run id')}",
+        "--name", _check(name, _VOLUME, "container name"), "--label", f"{RUN_LABEL}={_check(run_id, _RUN_ID, 'run id')}",
         "--user", SANDBOX_USER, "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--read-only", "--tmpfs", "/tmp", "--tmpfs", f"/work:exec,uid={SANDBOX_USER.split(':')[0]},size=2g",
         "--pids-limit", "512", "--memory", spec.memory, "--cpus", str(spec.cpus),
@@ -92,14 +101,15 @@ def _hardening(spec: Spec, run_id: str) -> list[str]:
 
 
 def test_argv(
-    spec: Spec, src: Path, command: list[str], run_id: str, venv_volume: str, passthrough: tuple[str, ...] | list[str] = ()
-) -> list[str]:
+    spec: Spec, src: Path, command: list[str], run_id: str, venv_volume: str, passthrough: tuple[str, ...] | list[str] = (),
+    *, name: str | None = None,
+) -> list[str]:  # fmt: skip
     """`docker run` for one offline test run: no network, source read-only at /src (copied to /work by the image's entry
     script), the prepared venv read-only at /venv. `command` comes from config.yaml, never from a plan."""
     if not command or not all(isinstance(c, str) and c for c in command):
         raise SandboxError("sandbox command must be a non-empty list of strings")
     return [
-        "docker", "run", *_hardening(spec, run_id), "--network", "none",
+        "docker", "run", *_hardening(spec, run_id, name if name is not None else container_name(run_id)), "--network", "none",
         "--mount", f"type=bind,src={_src_arg(src)},dst=/src,readonly",
         "--mount", f"type=volume,src={_check(venv_volume, _VOLUME, 'volume name')},dst=/venv,readonly",
         "-e", "UV_PROJECT_ENVIRONMENT=/venv", "-e", "UV_NO_SYNC=1", "-e", "UV_OFFLINE=1", "-e", "UV_PYTHON_DOWNLOADS=never",
@@ -112,11 +122,11 @@ def test_argv(
 test_argv.__test__ = False  # not a pytest test, whatever module imports it
 
 
-def warm_argv(spec: Spec, src: Path, run_id: str, venv_volume: str) -> list[str]:
+def warm_argv(spec: Spec, src: Path, run_id: str, venv_volume: str, *, name: str | None = None) -> list[str]:
     """`docker run` for the one step that has network: `uv sync --frozen` into the venv volume, on content you committed or
     approved. The uv cache is a named volume, so a new venv is filled from it without downloading again."""
     return [
-        "docker", "run", *_hardening(spec, run_id),
+        "docker", "run", *_hardening(spec, run_id, name if name is not None else container_name(run_id)),
         "--mount", f"type=bind,src={_src_arg(src)},dst=/src,readonly",
         "--mount", f"type=volume,src={_check(venv_volume, _VOLUME, 'volume name')},dst=/venv",
         "--mount", f"type=volume,src={UV_CACHE_VOLUME},dst=/uvcache",
@@ -198,6 +208,78 @@ def build_image(image: str, context: Path | None = None) -> ProcessOutput:
         raise SandboxError(f"no Dockerfile in {context}")
     clear_cache()  # a new image changes the answer
     return run_process(build_argv(image, context), cwd=context, env=child_env(), timeout_s=BUILD_TIMEOUT_S)
+
+
+# ---------- running and cleaning up containers ----------
+# Every engine call after the probe goes through these two functions, so a test replaces just them (tests/docker_sim.py).
+
+CALL_TIMEOUT_S = 15  # short engine calls (ps, rm, inspect); a half-started Docker Desktop must not hang a run
+
+
+def docker_run(
+    argv: list[str], *, inner: list[str], src: Path, env: dict[str, str], timeout_s: int, cancel: threading.Event | None = None
+) -> ProcessOutput:
+    """The long `docker run`. Cancellable. Killing the docker CLI does NOT stop the container; `sweep` does.
+    `inner` (the command inside) and `src` (the mounted folder) are not used here: a test double runs `inner` in `src`
+    on the host instead of starting a container."""
+    return run_process(argv, cwd=Path.cwd(), env=env, timeout_s=timeout_s, cancel=cancel)
+
+
+def docker_call(argv: list[str], timeout_s: int = CALL_TIMEOUT_S) -> ProcessOutput:
+    """A short engine call (`ps`, `rm`, `inspect`). Never cancellable, so cleanup still runs after a cancel."""
+    return run_process(argv, cwd=Path.cwd(), env=child_env(), timeout_s=timeout_s)
+
+
+def _why(out: ProcessOutput) -> str:
+    if out.not_found:
+        return "the docker command was not found on PATH"
+    if out.timed_out:
+        return f"docker did not answer within {CALL_TIMEOUT_S} s"
+    return _first_line(out.stderr) or out.error or f"exit {out.returncode}"
+
+
+def _ok(out: ProcessOutput) -> bool:
+    return out.returncode == 0 and not (out.not_found or out.timed_out or out.cancelled)
+
+
+def sweep(run_id: str, log: Callable[[str], None] = lambda m: None) -> list[str]:
+    """Force-remove every container (running or stopped) labelled `orch.run=<run_id>`. Returns the ids removed.
+    Never raises: a failure is logged with the exact command to check by hand, and the run goes on."""
+    label = f"{RUN_LABEL}={_check(run_id, _RUN_ID, 'run id')}"
+    ps = docker_call(["docker", "ps", "-aq", "--filter", f"label={label}"])
+    if not _ok(ps):
+        log(f"warning: could not list sandbox containers ({_why(ps)}); check by hand: docker ps -a --filter label={label}")
+        return []
+    ids = [i for i in ps.stdout.split() if _CONTAINER_ID.fullmatch(i)]
+    if not ids:
+        return []
+    rm = docker_call(["docker", "rm", "-f", *ids])
+    if not _ok(rm):
+        log(f"warning: could not remove sandbox containers ({_why(rm)}); remove by hand: docker rm -f {' '.join(ids)}")
+        return []
+    return ids
+
+
+@dataclass(frozen=True)
+class Container:
+    id: str
+    run: str  # the orch.run label
+    status: str  # docker's own text, e.g. "Up 3 minutes" or "Exited (0) 2 hours ago"
+
+
+def list_containers() -> list[Container]:
+    """Every container with an `orch.run` label, any state. Raises SandboxError when the engine cannot answer."""
+    fmt = "{{.ID}}|{{.Label \"" + RUN_LABEL + "\"}}|{{.Status}}"
+    out = docker_call(["docker", "ps", "-a", "--filter", f"label={RUN_LABEL}", "--format", fmt])
+    if not _ok(out):
+        raise SandboxError(f"cannot list sandbox containers: {_why(out)}")
+    found: list[Container] = []
+    for line in out.stdout.splitlines():
+        cid, _, rest = line.strip().partition("|")
+        label, _, status = rest.partition("|")
+        if _CONTAINER_ID.fullmatch(cid):
+            found.append(Container(cid, label, status))
+    return found
 
 
 _clock = time.monotonic

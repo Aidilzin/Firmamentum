@@ -1,6 +1,7 @@
 import pytest
 
 import git_helpers
+from docker_sim import DockerSim
 from orch import budget, sandbox, workspace
 
 
@@ -23,10 +24,14 @@ def isolated_worktree_root(tmp_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def fake_docker(monkeypatch):
-    """Tests never start Docker: the engine probe answers "running, image present" unless a test replaces it."""
+    """Tests never start Docker: the engine probe answers "running, image present" unless a test replaces it, and the
+    run / short-call seams talk to a DockerSim (tests/docker_sim.py). A test can take this fixture to inspect the sim."""
     sandbox.clear_cache()
     monkeypatch.setattr(sandbox, "docker_probe", lambda image: sandbox.ProbeResult(True, True, "sha256:fake", "0.0-test"))
-    yield
+    sim = DockerSim()
+    monkeypatch.setattr(sandbox, "docker_run", sim.docker_run)
+    monkeypatch.setattr(sandbox, "docker_call", sim.docker_call)
+    yield sim
     sandbox.clear_cache()
 
 
