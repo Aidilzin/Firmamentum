@@ -6,10 +6,12 @@ refuses any path that is not a linked worktree under `worktree_root()`.
 
 from __future__ import annotations
 
+import io
 import os
 import re
 import subprocess
 import sys
+import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +38,11 @@ def worktree_root() -> Path:
         base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
         return Path(base) / "orch" / "wt"
     return Path.home() / ".local" / "share" / "orch" / "wt"
+
+
+def warm_root() -> Path:
+    """Scratch folders for the sandbox warm step (a run's base commit exported without .git), next to the worktrees."""
+    return worktree_root().parent / "warm"
 
 
 def _safe_name(s: str) -> str:
@@ -193,6 +200,28 @@ def commit_step(
         on_staged(git(wt, "write-tree").stdout.strip())
     git(wt, *_no_hooks_args(), *_identity_args(wt), "commit", "--allow-empty", "-m", f"orch({step_id}): {title}")
     return git(wt, "rev-parse", "HEAD").stdout.strip()
+
+
+_REV = re.compile(r"[0-9A-Za-z][0-9A-Za-z._/-]*")
+
+
+def export_tree(repo: Path, rev: str, dest: Path) -> None:
+    """Write the files of commit `rev` into `dest` (created; it must not exist or be empty). No `.git`, no history.
+    Unpacked with tarfile's `data` filter, so a link or path in the archive cannot point outside `dest`."""
+    if not _REV.fullmatch(rev or ""):
+        raise WorkspaceError(f"bad revision {rev!r}")
+    dest = Path(dest)
+    if dest.exists() and any(dest.iterdir()):
+        raise WorkspaceError(f"export folder is not empty: {dest}")
+    p = subprocess.run(["git", "archive", "--format=tar", rev], cwd=repo, capture_output=True, check=False)
+    if p.returncode != 0:
+        raise WorkspaceError(f"git archive {rev} failed ({p.returncode}): {p.stderr.decode('utf-8', 'replace').strip()}")
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        with tarfile.open(fileobj=io.BytesIO(p.stdout), mode="r:") as tar:
+            tar.extractall(dest, filter="data")
+    except (tarfile.TarError, OSError) as e:
+        raise WorkspaceError(f"cannot unpack {rev} into {dest}: {e}") from e
 
 
 def diff(repo_or_wt: Path, a: str, b: str | None = None) -> str:

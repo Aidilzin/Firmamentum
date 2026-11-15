@@ -149,7 +149,7 @@ def test_warm_step_has_network_and_a_writable_venv_but_the_same_lockdown(tmp_pat
     assert "type=volume,src=orch-venv-abc,dst=/venv" in mounts and not any(m.endswith("/venv,readonly") for m in mounts)
     assert "type=volume,src=orch-uv-cache,dst=/uvcache" in mounts
     assert {"UV_LINK_MODE=copy", "UV_CACHE_DIR=/uvcache", "UV_PROJECT_ENVIRONMENT=/venv"} <= set(pairs(a, "-e"))
-    assert a[a.index(SPEC.image) + 1 :] == ["uv", "sync", "--frozen"]
+    assert a[a.index(SPEC.image) + 1 :] == ["sh", "-c", "uv sync --frozen && touch /venv/.orch-ready"]
     assert pairs(a, "--cap-drop") == ["ALL"] and "--read-only" in a and pairs(a, "--user") == ["1000:1000"]
     assert pairs(a, "--label") == ["orch.run=r"]
 

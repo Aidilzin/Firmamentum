@@ -122,6 +122,11 @@ def test_argv(
 test_argv.__test__ = False  # not a pytest test, whatever module imports it
 
 
+# The marker is written last, so a warm that was killed half way is never taken for a finished one (entry.sh checks it).
+WARM_COMMAND = ["sh", "-c", "uv sync --frozen && touch /venv/.orch-ready"]
+WARM_TIMEOUT_S = 600
+
+
 def warm_argv(spec: Spec, src: Path, run_id: str, venv_volume: str, *, name: str | None = None) -> list[str]:
     """`docker run` for the one step that has network: `uv sync --frozen` into the venv volume, on content you committed or
     approved. The uv cache is a named volume, so a new venv is filled from it without downloading again."""
@@ -131,7 +136,7 @@ def warm_argv(spec: Spec, src: Path, run_id: str, venv_volume: str, *, name: str
         "--mount", f"type=volume,src={_check(venv_volume, _VOLUME, 'volume name')},dst=/venv",
         "--mount", f"type=volume,src={UV_CACHE_VOLUME},dst=/uvcache",
         "-e", "UV_PROJECT_ENVIRONMENT=/venv", "-e", "UV_CACHE_DIR=/uvcache", "-e", "UV_LINK_MODE=copy",
-        "-w", "/work", spec.image, "uv", "sync", "--frozen",
+        "-w", "/work", spec.image, *WARM_COMMAND,
     ]  # fmt: skip
 
 
@@ -431,6 +436,29 @@ def _run_once(spec: Spec, src: Path, command: list[str], run_id: str, volume: st
     return classify(out, name, spec.memory)
 
 
+def _warm(spec: Spec, run_id: str, volume: str, warm_src: WarmSource, cancel: threading.Event | None,
+          log: Callable[[str], None]) -> TestRun | None:  # fmt: skip
+    """Prepare the venv volume: the one container with network. Returns None when it worked, else why not.
+    `warm_src` hands out a folder holding trusted content only (the run's base commit plus approved dependency files);
+    it raises SandboxError when it cannot, for example for a dependency change you have not approved."""
+    log("preparing the test environment (network is on for this one container; it runs once per dependency change)")
+    with warm_src() as src:
+        name = container_name(run_id)
+        argv = warm_argv(spec, src, run_id, volume, name=name)
+        out = docker_run(argv, inner=WARM_COMMAND, src=src, env=child_env(), timeout_s=WARM_TIMEOUT_S, cancel=cancel)
+    if out.cancelled:
+        return TestRun("cancelled")
+    if out.timed_out:
+        return _infra(f"preparing the test environment timed out after {WARM_TIMEOUT_S} s", out)
+    res = classify(out, name, spec.memory)
+    if res.kind == "ran" and res.exit_code == 0:
+        return None
+    if res.kind == "ran":
+        tail = next((ln.strip() for ln in reversed((out.stderr or out.stdout).splitlines()) if ln.strip()), "")[:200]
+        return _infra(f"preparing the test environment failed (exit {res.exit_code}): {tail}", out)
+    return TestRun("infra", res.exit_code, res.stdout, res.stderr, f"preparing the test environment failed: {res.detail}")
+
+
 def run_tests(
     target: ResolvedRepo, cfg: SandboxConfig, src: Path, command: list[str], run_id: str, *,
     warm_src: WarmSource | None = None, timeout_s: int = 600, cancel: threading.Event | None = None,
@@ -455,8 +483,15 @@ def run_tests(
         volume = venv_volume_name(src, st.image_id)
         res = _run_once(spec, src, command, run_id, volume, env, target.env_passthrough, timeout_s, cancel)
         if res.kind == "ran" and res.exit_code == EXIT_VENV_NOT_READY:
-            res = TestRun("infra", res.exit_code, res.stdout, res.stderr,
-                          "the test environment (venv volume) is not prepared and there is no source to prepare it from")  # fmt: skip
+            if warm_src is None:
+                return TestRun("infra", res.exit_code, res.stdout, res.stderr,
+                               "the test environment (venv volume) is not prepared and there is no source to prepare it from")  # fmt: skip
+            if (failed := _warm(spec, run_id, volume, warm_src, cancel, log)) is not None:
+                return failed
+            res = _run_once(spec, src, command, run_id, volume, env, target.env_passthrough, timeout_s, cancel)
+            if res.kind == "ran" and res.exit_code == EXIT_VENV_NOT_READY:  # warmed, and still not ready: do not loop
+                return TestRun("infra", res.exit_code, res.stdout, res.stderr,
+                               "the test environment is still not ready after it was prepared")  # fmt: skip
         return res
     except SandboxError as e:
         return _infra(str(e))

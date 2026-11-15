@@ -2,6 +2,7 @@
 
 import sys
 import threading
+from contextlib import contextmanager
 
 import pytest
 
@@ -224,3 +225,111 @@ def test_a_failing_sweep_warns_and_the_result_stands(tmp_path, fake_docker):
     res = go(tmp_path, log=logs.append)
     assert res.kind == "ran" and res.exit_code == 1
     assert any("docker rm -f" in m for m in logs)
+
+
+# ---------- the warm step ----------
+
+
+def warm_folder(tmp_path):
+    """A `warm_src` that hands out a scratch folder and records that it was cleaned up."""
+    folder = tmp_path / "warm-src"
+    state = {"entered": 0, "left": 0}
+
+    @contextmanager
+    def src():
+        state["entered"] += 1
+        folder.mkdir(exist_ok=True)
+        try:
+            yield folder
+        finally:
+            state["left"] += 1
+
+    return src, folder, state
+
+
+def test_not_ready_then_warm_then_the_same_run_again(tmp_path, fake_docker):
+    src, folder, state = warm_folder(tmp_path)
+    fake_docker.script = [exits(96), exits(0)]  # the third docker run is the tests, on the host
+    logs = []
+    res = go(tmp_path, FAIL, warm_src=src, log=logs.append)
+    assert res.kind == "ran" and res.exit_code == 1  # the tests ran after the warm and failed on their own
+    first, warm, again = (r["argv"] for r in fake_docker.runs)
+    assert "--network" in first and "--network" in again and "--network" not in warm  # only the warm has network
+    assert f"type=bind,src={folder},dst=/src,readonly" in warm and f"type=bind,src={tmp_path},dst=/src,readonly" in first
+    assert warm[warm.index("--name") + 1] not in (first[first.index("--name") + 1], again[again.index("--name") + 1])
+    assert warm[-3:] == ["sh", "-c", "uv sync --frozen && touch /venv/.orch-ready"]
+    assert fake_docker.runs[1]["inner"] == sandbox.WARM_COMMAND and fake_docker.runs[2]["inner"] == FAIL
+    assert state == {"entered": 1, "left": 1}  # the folder is released as soon as the warm container is done
+    assert any("preparing the test environment" in m for m in logs)
+    assert fake_docker.boxes == {}
+
+
+def test_an_environment_that_is_ready_is_never_warmed(tmp_path, fake_docker):
+    src, _, state = warm_folder(tmp_path)
+    assert go(tmp_path, PASS, warm_src=src).passed
+    assert len(fake_docker.runs) == 1 and state["entered"] == 0
+
+
+def test_still_not_ready_after_the_warm_does_not_loop(tmp_path, fake_docker):
+    src, _, state = warm_folder(tmp_path)
+    fake_docker.script = [exits(96), exits(0), exits(96)]
+    res = go(tmp_path, warm_src=src)
+    assert res.kind == "infra" and "still not ready" in res.detail
+    assert len(fake_docker.runs) == 3 and state["entered"] == 1
+
+
+def test_a_failed_warm_is_infra_with_the_last_line_of_its_output(tmp_path, fake_docker):
+    src, _, _ = warm_folder(tmp_path)
+
+    def warm_fails(sim, box, argv):
+        box.status, box.exit_code = "exited", 2
+        return ProcessOutput(stderr="resolving...\nerror: lockfile out of date\n", returncode=2)
+
+    fake_docker.script = [exits(96), warm_fails]
+    res = go(tmp_path, warm_src=src)
+    assert res.kind == "infra" and "exit 2" in res.detail and "lockfile out of date" in res.detail
+    assert len(fake_docker.runs) == 2  # the tests did not run
+
+
+def test_a_warm_that_cannot_start_is_infra(tmp_path, fake_docker):
+    src, _, _ = warm_folder(tmp_path)
+    fake_docker.script = [exits(96), exits(137, oom=True)]
+    res = go(tmp_path, warm_src=src)
+    assert res.kind == "infra" and "out of memory" in res.detail and "preparing" in res.detail
+
+
+def test_a_warm_that_times_out_is_infra_and_its_container_is_gone(tmp_path, fake_docker, monkeypatch):
+    src, _, _ = warm_folder(tmp_path)
+    monkeypatch.setattr(sandbox, "WARM_TIMEOUT_S", 1)
+    monkeypatch.setattr(sandbox, "WARM_COMMAND", SLEEP)  # the sim runs `inner` on the host
+    fake_docker.script = [exits(96)]
+    res = go(tmp_path, warm_src=src)
+    assert res.kind == "infra" and "timed out" in res.detail
+    assert fake_docker.boxes == {}
+
+
+def test_cancel_during_the_warm(tmp_path, fake_docker, monkeypatch):
+    src, _, _ = warm_folder(tmp_path)
+    ev = threading.Event()
+    threading.Timer(0.5, ev.set).start()
+    monkeypatch.setattr(sandbox, "WARM_COMMAND", SLEEP)
+    fake_docker.script = [exits(96)]
+    res = go(tmp_path, warm_src=src, cancel=ev)
+    assert res.kind == "cancelled" and fake_docker.boxes == {}
+
+
+def test_a_refused_warm_source_stops_before_any_warm_container(tmp_path, fake_docker):
+    @contextmanager
+    def refused():
+        raise sandbox.SandboxError("dependency change not approved: uv.lock")
+        yield  # pragma: no cover
+
+    fake_docker.script = [exits(96)]
+    res = go(tmp_path, warm_src=refused)
+    assert res.kind == "infra" and "dependency change not approved: uv.lock" in res.detail
+    assert len(fake_docker.runs) == 1
+
+
+def test_without_a_warm_source_a_missing_environment_is_infra(tmp_path, fake_docker):
+    fake_docker.script = [exits(96)]
+    assert go(tmp_path).kind == "infra"

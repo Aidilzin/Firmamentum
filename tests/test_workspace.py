@@ -176,3 +176,38 @@ def test_merge_does_not_run_repo_hooks(repo, tmp_path):
     git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "side change")
     workspace.merge_no_ff(repo, "orch/run1", "merge")  # a real merge commit, so pre-merge-commit would fire
     assert not marker.exists()
+
+
+# ---------- export_tree ----------
+
+
+def test_export_tree_writes_the_commit_without_git_untracked_or_ignored_files(repo, tmp_path):
+    (repo / "src").mkdir()
+    (repo / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "a")
+    sha = git(repo, "rev-parse", "HEAD").strip()
+    (repo / "untracked.txt").write_text("x", encoding="utf-8")
+    (repo / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")  # uncommitted edit
+    dest = tmp_path / "out"
+    workspace.export_tree(repo, sha, dest)
+    assert (dest / "src" / "a.py").read_text(encoding="utf-8") == "a = 1\n"
+    assert not (dest / ".git").exists() and not (dest / "untracked.txt").exists() and not (dest / ".orch").exists()
+
+
+def test_export_tree_refuses_a_dirty_destination_and_a_flag_as_revision(repo, tmp_path):
+    dest = tmp_path / "out"
+    dest.mkdir()
+    (dest / "x").write_text("x", encoding="utf-8")
+    with pytest.raises(workspace.WorkspaceError, match="not empty"):
+        workspace.export_tree(repo, "HEAD", dest)
+    for bad in ("--output=evil", "-x", "", "a b", "a;b"):
+        with pytest.raises(workspace.WorkspaceError, match="bad revision"):
+            workspace.export_tree(repo, bad, tmp_path / "o2")
+    assert not (tmp_path / "o2").exists()
+
+
+def test_export_tree_unknown_revision(repo, tmp_path):
+    with pytest.raises(workspace.WorkspaceError, match="git archive"):
+        workspace.export_tree(repo, "no-such-branch", tmp_path / "out")
+    assert not (tmp_path / "out").exists()
