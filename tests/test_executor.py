@@ -236,6 +236,15 @@ def test_default_protected_paths():
         assert "touches_auth_payments_secrets_env" not in rules(p), p
 
 
+def test_protected_paths_ignore_case_even_when_normcase_does_nothing(monkeypatch):
+    # on Linux os.path.normcase is the identity; simulate that so the check is the same on every OS
+    monkeypatch.setattr("os.path.normcase", lambda p: p)
+    for p in ("Secrets.yaml", ".ENV", "A/B.PEM", "SRC/Auth/Login.py", "Id_Rsa", "MY_SECRET.txt", "Billing/PAYMENTS.py"):
+        assert "touches_auth_payments_secrets_env" in rules(p), p
+    assert "executes_later" in rules("TESTS/Conftest.py") or "executes_later" in rules("MAKEFILE")
+    assert "touches_auth_payments_secrets_env" not in rules("README.MD")
+
+
 def test_default_executes_later_dependency_and_migration():
     for p in (".claude/settings.json", "a/CLAUDE.md", "AGENTS.md", ".mcp.json", ".github/workflows/ci.yml", ".githooks/pre-commit",
               ".husky/pre-commit", "Makefile", "tests/conftest.py", "pytest.ini", "tox.ini", "setup.cfg", ".gitattributes",

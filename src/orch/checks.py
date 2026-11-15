@@ -1,7 +1,7 @@
 """Post-check path rules: which changed files stop a step for approval.
 
 Patterns are globs on forward-slash paths. A pattern without `/` matches the file name at any depth; one with `/`
-matches the whole path from the repo root (`**` crosses folders). Paths are compared with `os.path.normcase`, so a
+matches the whole path from the repo root (`**` crosses folders). Paths are compared in lower case on every OS, so a
 case-insensitive file system cannot hide a file. Everything here is config data (`post_checks:` in config.yaml).
 """
 
@@ -24,8 +24,8 @@ ORCH_ROOT = Path(__file__).resolve().parents[2]
 
 
 def norm_path(path: str) -> str:
-    """Forward slashes, no leading `./` or `/`, normcase'd (lower case on Windows)."""
-    p = os.path.normcase(path).replace("\\", "/")
+    """Forward slashes, no leading `./` or `/`, lower case on every OS (normcase alone does nothing on Linux)."""
+    p = os.path.normcase(path).lower().replace("\\", "/")
     while p.startswith("./"):
         p = p.removeprefix("./")
     return p.strip("/")
