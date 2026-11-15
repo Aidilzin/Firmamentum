@@ -1,7 +1,7 @@
 import pytest
 
 import git_helpers
-from orch import budget, workspace
+from orch import budget, sandbox, workspace
 
 
 REAL_DEFAULT_DB_PATH = budget.default_db_path
@@ -19,6 +19,15 @@ def isolated_worktree_root(tmp_path, monkeypatch):
     root = tmp_path / "orch-wt"
     monkeypatch.setattr(workspace, "worktree_root", lambda: root)
     return root
+
+
+@pytest.fixture(autouse=True)
+def fake_docker(monkeypatch):
+    """Tests never start Docker: the engine probe answers "running, image present" unless a test replaces it."""
+    sandbox.clear_cache()
+    monkeypatch.setattr(sandbox, "docker_probe", lambda image: sandbox.ProbeResult(True, True, "sha256:fake", "0.0-test"))
+    yield
+    sandbox.clear_cache()
 
 
 # A test is `slow` when it makes a git repo or runs the executor: it spawns 30-70 git processes (about 45 ms each on Windows).
