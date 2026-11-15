@@ -137,7 +137,7 @@ Every command that takes a run id also accepts a unique prefix of it and `--repo
 | `reject` | Rejects a step and stops the run | `orch reject 20261110T --step s1 --repo orch` |
 | `answer` | Answers a planner or builder question | `orch answer 20261110T "use sqlite" --step s1 --repo orch` |
 | `diff` | Shows a run's diff (`--step sN`). Stopped steps show their uncommitted changes | `orch diff 20261110T --step s1 --repo orch` |
-| `merge` | `--no-ff` merge into your current branch, then runs the tests (`--allow-main`) | `orch merge 20261110T --repo orch` |
+| `merge` | Builds the `--no-ff` merge result without touching your checkout, runs the tests on it (in the container for a docker repo), and moves your current branch only if they pass (`--allow-main`). On a failure nothing changes | `orch merge 20261110T --repo orch` |
 | `clean` | Removes the worktree and keeps the branch | `orch clean 20261110T --repo orch` |
 
 Exit codes of `plan`, `exec`, `run`, `resume`, `approve` and `answer`: 0 done, 1 failed, 2 needs input, needs approval or refused, 3 paused, 130 stopped by you.
@@ -224,7 +224,7 @@ repos:                                  # the ONLY source of test commands
 
 **The worktree is not a sandbox.** It keeps agents away from your checkout, nothing more.
 
-- **For a `sandbox: off` repo, tests the builder writes run with your user rights.** The test command (`uv run pytest -q` and so on) executes whatever test code or `conftest.py` the builder wrote, as you, on this machine. For a `docker` repo that is no longer true of orch's own test runs (below), but two paths still run on the host: the builder's own `Bash(uv run pytest -q)` call while it works (Phase 4) and the test run after `orch merge` in your real checkout (Phase 3). The deny rules for `git`, `rm` and `pip` apply to the agent's Bash tool, not to code a test runs.
+- **For a `sandbox: off` repo, tests the builder writes run with your user rights.** The test command (`uv run pytest -q` and so on) executes whatever test code or `conftest.py` the builder wrote, as you, on this machine. For a `docker` repo that is no longer true of orch's own test runs or of the test run in `orch merge` (below); one path still runs on the host: the builder's own `Bash(uv run pytest -q)` call while it works (Phase 4). A `sandbox: off` repo gets the same new merge order, with the tests on a throwaway worktree on this machine and the warning in the output. The deny rules for `git`, `rm` and `pip` apply to the agent's Bash tool, not to code a test runs.
 - **So only run orch on your own repos, with tasks you wrote.** Do not paste issue text, README content or web pages you do not trust into a request: a prompt injection there can make the builder write a test that does anything you can do.
 - What the flags do limit: Claude workers run with `--restricted --strict-mcp-config` (file tools confined to the worktree, your settings, hooks and MCP servers ignored), Bash is allowed only for the exact test commands from `config.yaml`, and workers and test runs see an allow-listed environment instead of your whole one (no API keys, tokens or cloud credentials unless you list them in `env_passthrough`). What they do not limit: the test process itself.
 - Review the diff before `orch merge`, especially test files, `conftest.py`, CI files and anything that stops for approval.
@@ -242,7 +242,7 @@ repos:                                  # the ONLY source of test commands
 - `orch doctor` checks the engine, the image, leftover containers and warns for every repo that is `off`. Run headers, `orch status` and the run log show `sandbox: off` in the warning colour.
 - `orch sandbox build`, `orch sandbox check` and `orch sandbox test`. `orch sandbox test --repo practice` runs the repo's tests by hand through exactly the path a real run uses (no model call). `--probe` runs them on a scratch export of `HEAD` with three planted tests that try to write outside the working copy, open a socket and read a host environment variable (a canary set in the docker CLI's own environment); each passes only when the attempt fails inside, so a green run means the real tests passed and all three attempts were blocked.
 
-What is **not** done, and still runs on this machine with your rights: **(a)** the builder's and repair agent's own `Bash(uv run pytest -q)` call while they work (Phase 4), and **(b)** the test run after `orch merge`, in your real checkout (Phase 3; `orch merge` prints a note about it for docker repos). Known limits: tests run on Linux, so Windows-only code paths are not gated; the editable install is made from the base commit, so a step that adds a new top-level package in a flat (non-`src/`) layout may need a re-warm; a container escape would reach the Docker Desktop VM.
+What is **not** done, and still runs on this machine with your rights: the builder's and repair agent's own `Bash(uv run pytest -q)` call while they work (Phase 4). `orch merge` (Phase 3) now tests the merge result first: `git merge-tree --write-tree` and `git commit-tree` build the candidate commit without touching your checkout, the tests run in the container on a throwaway worktree of it (mounted read-only, no network, repo hooks off), and `git merge --ff-only` moves your branch only if they pass. A failing, timed-out or unrunnable test run leaves your branch and files as they were; the full output is in `<run folder>/merge-tests.txt`. After a pass the code is in your checkout, so your own `uv run pytest`, editor and Claude sessions run it with your rights (the `executes_later` stop and your review of `orch diff` are the gate). The merge needs git 2.38 or newer (`orch doctor` checks); it holds the run's lock, so a run in use cannot be merged. Known limits: tests run on Linux, so Windows-only code paths are not gated; the editable install is made from the base commit, so a step that adds a new top-level package in a flat (non-`src/`) layout may need a re-warm; a container escape would reach the Docker Desktop VM.
 
 ## Safety model
 
@@ -251,7 +251,7 @@ What is **not** done, and still runs on this machine with your rights: **(a)** t
 | Worktrees only | Agents edit a git worktree under `%LOCALAPPDATA%\orch\wt\<repo>\<run>` on branch `orch/<run>`, outside your checkout. Your main checkout stays clean. |
 | Path guards | `reset --hard`, `clean`, `commit` and `worktree remove` refuse any path that is not a linked worktree under that root, whose `.git` file does not point at its own worktree folder, or (for commit and reset) that is not on the run's branch. |
 | HEAD pinned per step | If HEAD or the branch moves during a step (an agent ran `git commit` or `reset`), the step stops with `git_state_changed` instead of passing with an empty diff. |
-| No repo hooks | orch's own `git commit` and `git merge` run with `core.hooksPath` pointed at an empty folder and fsmonitor off, so a hook the builder edited never runs. |
+| No repo hooks | orch's own `git commit`, `git worktree add` and `git merge --ff-only` run with `core.hooksPath` pointed at an empty folder and fsmonitor off, so a hook the builder edited never runs. |
 | Read-only roles | Laplace and Loschmidt run claude with `--tools Read,Grep,Glob` and no prompts. Brillouin and agy run `--mode plan --sandbox`. agy reviews only if `allow_agy_reviewer: true`. |
 | Limited builder | Maxwell and Descartes get Edit and Write confined to the worktree (`--restricted`), and Bash only for the exact configured test commands (no trailing wildcard, so pytest flags cannot be appended). `git`, `uv add`, `pip`, `rm` and `del` are also denied. |
 | Test command from config only | The plan's `test_command` is never used. `orch` runs the tests itself and trusts the exit code, not an agent's claim. |
@@ -266,7 +266,7 @@ What is **not** done, and still runs on this machine with your rights: **(a)** t
 | Approval stop: no agent left | Both agents rate limited pauses the run. |
 | Approvals are per file | Approving covers only the flagged files and rules. A new flagged item stops again. (Content-bound approvals are still to do.) |
 | Nothing failing is committed | Failing tests are never committed. With review on, nothing is committed unreviewed. |
-| Never pushes | `merge` is local only. It refuses on a dirty tree, a detached HEAD, or main or master without `--allow-main`. |
+| Never pushes | `merge` is local only. It refuses on a dirty tree, a detached HEAD, a conflict, or main or master without `--allow-main`. |
 | Credentials | `orch` never reads OAuth tokens or credential files. Children get an allow-listed environment, and `ANTHROPIC_*` is always removed. |
 | Rate limits | Detected only from stderr and the CLIs' structured error fields, never from model text or tool output. |
 

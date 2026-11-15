@@ -319,8 +319,8 @@ What differs from the sketch above:
   `docker rm -f` command. It never removes anything.
 - **Known limit.** The editable install is made from the base commit. A step that adds a new top-level package in a flat
   (non-`src/`) layout may need a re-warm. `orch` and `practice` use a `src/` layout and are not affected.
-- **Still on the host:** the builder's own `Bash(uv run pytest -q)` call (Phase 4) and the post-merge run (Phase 3).
-  `orch merge` prints a note about the second for docker repos.
+- **Still on the host:** the builder's own `Bash(uv run pytest -q)` call (Phase 4). (The post-merge run moved into the
+  container in Phase 3.)
 
 ### Phase 2 hand checks (no model call; done 16 Nov 2026)
 
@@ -357,8 +357,55 @@ Fixes made after the hand checks (commit "Sandbox Phase 2 fixes from the hand ch
 
 Still not checked by hand: `--timeout` on a real container, and the cold start with Docker Desktop stopped.
 
-**Phase 3: (c).**
+**Phase 3: (c). Done in code 16 Nov 2026** (six commits, `Sandbox Phase 3, 1/6` to `6/6`). Fake tests only; the hand
+checks are listed below and are not done yet.
 9. Merge candidate with `merge-tree` and `commit-tree`; test in a temp worktree; fast-forward only on pass.
+
+What differs from the sketch above:
+- **Order.** `orch merge` takes the run's lock, resolves the target and branch shas once, and builds the candidate with
+  `git merge-tree --write-tree --name-only -z` plus `git commit-tree` (two parents, the message `Merge orch run: ...`).
+  A conflict stops there ("Nothing was changed"). The candidate is checked out as a detached worktree
+  `<worktree root>/<repo>/merge-<run id>` with orch's no-hooks options (a tracked `post-checkout` hook would be
+  agent-written code on the host), the tests run on it, the worktree is always removed, and only after a pass,
+  with the checkout still clean and on the same branch, `git merge --ff-only <candidate>` moves the branch and
+  `merged_sha` is written. If you committed meanwhile, the fast-forward refuses and nothing is merged.
+- **Already merged by hand.** A branch that is already an ancestor of the target is recorded (`merged_sha`) without
+  tests, so a merge made by hand (or an orch crash between the fast-forward and `meta.json`) does not leave `orch status`
+  offering "merge" forever.
+- **`sandbox: off` repos get the new order too.** One code path; the tests run on the throwaway worktree on the host and
+  the run header shows `OFF_WARNING`.
+- **Results.** pass: exit 0. Tests fail or time out: exit 1, "Nothing was merged", the path of
+  `<run folder>/merge-tests.txt` (full output), and the hint "read `orch diff <run>` first, then `git merge --no-ff
+  <branch>`; that manual merge runs this repo's git hooks on this machine". Sandbox problem (engine down, image missing,
+  out of memory, command not found in the image) or an unapproved dependency change: `SANDBOX ERROR`, exit 2, nothing
+  merged. Conflict and "the checkout changed while the tests ran": error, exit 1. Ctrl-C: nothing merged, exit 130.
+- **Warm step for a merge.** Usually none: if the target did not change a dependency file the venv volume is ready. When
+  one is needed, the source is your target commit plus the dependency files you approved in this run
+  (`warm.merge_warm_tree`). A dependency file whose merged text is neither the target's nor the branch's (both sides
+  changed it and git combined them) is refused before any container starts, even if the run's change was approved.
+- **Leftovers.** A `merge-<run id>` worktree or a container of the run left by a killed merge is removed at the start of
+  the next merge (the run lock proves nobody owns them).
+- **`orch doctor`** has a `git version` row: an error below 2.38, a warning when the version cannot be read.
+- `workspace.merge_no_ff` and the `MERGE_NOTE` text are gone.
+- Behaviour change, as announced in Decision 2: a merge with failing tests is no longer kept. To merge anyway, read the
+  diff and run `git merge --no-ff` by hand.
+
+### Phase 3 hand checks (the real check; no model call)
+
+Run on `practice` with Docker Desktop up. If `practice` has no finished, unmerged run, make one in a scratch copy: a branch
+`orch/<id>` with a commit and a minimal `meta.json` (`status: done`, `exec.branch`, `exec.base_sha`, `exec.repo_name`).
+
+1. **Pass:** `orch merge <id> --repo practice` on a work branch: `PASS`, then "Merged"; `git log -1` shows a two-parent
+   commit; `git worktree list` and `docker ps -a --filter label=orch.run` show nothing left.
+2. **Fail:** the same with a failing test on the branch: exit 1, `git rev-parse HEAD` and `git status` unchanged,
+   `merge-tests.txt` holds the output.
+3. **Conflict:** both sides edit one line: an error naming the file, nothing changed.
+4. **Host untouched:** a `conftest.py` on the branch that writes a canary file into the repo folder and into
+   `%USERPROFILE%`: neither file appears on the host.
+5. **Docker stopped:** `SANDBOX ERROR`, exit 2, nothing merged.
+6. **Ctrl-C** during the tests: nothing merged, no container, no temporary worktree.
+7. **Cold venv:** if the venv volume for the merged dependency files does not exist yet, the warm container starts once
+   and `docker ps -a` is empty afterwards.
 
 **Phase 4: (a).**
 10. Shim writer and `PATH` handling; tests assert the shim text equals `test_argv` and lives outside the worktree.
