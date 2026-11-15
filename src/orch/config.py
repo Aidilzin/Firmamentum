@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 ROLE_NAMES = ("planner", "scout", "builder", "reviewer", "repair")
 RiskFlag = Literal[
@@ -55,12 +56,58 @@ def parse_entry(value: object) -> Entry:
     raise ValueError(f"bad role entry {value!r}; expected 'agent:model'")
 
 
+DEFAULT_SANDBOX_IMAGE = "orch-sbx:py312"
+SandboxKind = Literal["docker", "off"]
+_IMAGE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*")  # cannot start with `-`, so it is never read as a docker flag
+
+
+def _image(v: str) -> str:
+    if not _IMAGE_RE.fullmatch(v):
+        raise ValueError(f"image {v!r}: expected a docker image name such as orch-sbx:py312")
+    return v
+
+
+class SandboxConfig(BaseModel):
+    """Top-level sandbox defaults (docs/sandbox-design.md). `memory` and `cpus` are limits for one test container."""
+
+    model_config = ConfigDict(extra="forbid")
+    image: str = DEFAULT_SANDBOX_IMAGE
+    memory: str = "4g"
+    cpus: int = Field(4, ge=1)
+
+    @field_validator("image")
+    @classmethod
+    def _image_name(cls, v: str) -> str:
+        return _image(v)
+
+    @field_validator("memory")
+    @classmethod
+    def _memory(cls, v: str) -> str:
+        if not re.fullmatch(r"[1-9][0-9]*[kmg]", v):
+            raise ValueError(f"memory {v!r}: expected a number and k, m or g, e.g. 4g")
+        return v
+
+
 class RepoConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str
     test_command: str
     retest_command: str | None = None  # repair rounds only; never from a plan
     env_passthrough: list[str] = []  # extra env var names workers and test runs may see (default: allow-list only)
+    # `docker`: agent-written tests run in a container. `off` must be written out on purpose; it runs them on this machine.
+    sandbox: SandboxKind = "docker"
+    image: str | None = None  # a different sandbox image for this repo (default: the top-level sandbox.image)
+
+    @field_validator("sandbox", mode="before")
+    @classmethod
+    def _sandbox_off(cls, v: object) -> object:
+        # YAML 1.1 reads a bare `off` as the boolean False. Accept that as "off"; `on`/`yes`/true is not a sandbox kind.
+        return "off" if v is False else v
+
+    @field_validator("image")
+    @classmethod
+    def _image_name(cls, v: str | None) -> str | None:
+        return None if v is None else _image(v)
 
 
 class UiConfig(BaseModel):
@@ -91,6 +138,7 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ui: UiConfig = UiConfig()
     post_checks: PostChecksConfig = PostChecksConfig()
+    sandbox: SandboxConfig = SandboxConfig()
     roles: dict[str, list[Entry]]
     fallback_model: dict[str, str] = {}  # superseded by role lists; accepted and ignored
     cooldown_minutes: int = 60
@@ -137,6 +185,8 @@ class ResolvedRepo(BaseModel):
     test_command: str | None  # None for an unconfigured path: the planner proposes one
     retest_command: str | None = None
     env_passthrough: list[str] = []
+    sandbox: SandboxKind = "docker"  # an unconfigured path is sandboxed too: there is no silent opt-out
+    image: str = DEFAULT_SANDBOX_IMAGE
 
 
 def default_config_path() -> Path:
@@ -181,14 +231,18 @@ def apply_overrides(cfg: Config, overrides: list[str]) -> Config:
 def resolve_repo(cfg: Config, name_or_path: str | None, cwd: Path | None = None) -> ResolvedRepo:
     """`None` means the current directory (`cwd` when given, else the process cwd); a relative path resolves against it too.
     A configured name wins over a path of the same text."""
+    def configured(name: str, path: Path) -> ResolvedRepo:
+        r = cfg.repos[name]
+        return ResolvedRepo(name=name, path=path, test_command=r.test_command, retest_command=r.retest_command,
+                            env_passthrough=r.env_passthrough, sandbox=r.sandbox, image=r.image or cfg.sandbox.image)  # fmt: skip
+
     if name_or_path and name_or_path in cfg.repos:
-        r = cfg.repos[name_or_path]
-        return ResolvedRepo(name=name_or_path, path=(cfg.base_dir / r.path).resolve(), test_command=r.test_command, retest_command=r.retest_command, env_passthrough=r.env_passthrough)
+        return configured(name_or_path, (cfg.base_dir / cfg.repos[name_or_path].path).resolve())
     base = Path(cwd) if cwd is not None else Path.cwd()
     path = (base / name_or_path).resolve() if name_or_path else base.resolve()  # an absolute name_or_path wins over base
     if not path.is_dir():
         raise ConfigError(f"repo {name_or_path!r} is neither a configured name nor an existing directory")
     for name, r in cfg.repos.items():
         if (cfg.base_dir / r.path).resolve() == path:
-            return ResolvedRepo(name=name, path=path, test_command=r.test_command, retest_command=r.retest_command, env_passthrough=r.env_passthrough)
-    return ResolvedRepo(name=None, path=path, test_command=None)
+            return configured(name, path)
+    return ResolvedRepo(name=None, path=path, test_command=None, image=cfg.sandbox.image)
