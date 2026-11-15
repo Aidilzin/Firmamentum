@@ -1,0 +1,2 @@
+# Files that are read inside the Linux container must keep LF endings, whatever core.autocrlf says.
+sandbox/* text eol=lf

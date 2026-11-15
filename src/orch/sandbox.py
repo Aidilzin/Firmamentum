@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from .adapters.process import child_env, run_process
+from .adapters.process import ProcessOutput, child_env, run_process
 from .config import ResolvedRepo, SandboxConfig
 
 CACHE_OK_S = 30.0  # a successful probe may be reused this long (display only); `require` never uses it
@@ -29,6 +29,7 @@ SANDBOX_USER = "1000:1000"
 OFF_WARNING = "sandbox: off (tests run on this machine, unconfined)"
 
 _RUN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_IMAGE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@-]*")
 _VOLUME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _BAD_MOUNT_CHARS = set(',"\'\n\r\0')  # `--mount` is a comma separated list; these would let a path add options
@@ -134,6 +135,16 @@ def venv_volume_name(src: Path, image_id: str) -> str:
     return "orch-venv-" + h.hexdigest()[:12]
 
 
+def dockerfile_dir() -> Path:
+    """The `sandbox/` folder next to src/ (Dockerfile and entry.sh), the same way config.yaml is found."""
+    return Path(__file__).resolve().parents[2] / "sandbox"
+
+
+def build_argv(image: str, context: Path) -> list[str]:
+    """`docker build` for the sandbox image. The image name is checked so it can never be read as a docker flag."""
+    return ["docker", "build", "--tag", _check(image, _IMAGE_NAME, "image name"), str(context)]
+
+
 # ---------- talking to the engine ----------
 
 
@@ -175,6 +186,19 @@ def docker_probe(image: str) -> ProbeResult:
 
 
 real_docker_probe = docker_probe  # tests replace `docker_probe` with a fake; this keeps the real one reachable
+
+BUILD_TIMEOUT_S = 1200  # first build pulls the base image and installs packages
+
+
+def build_image(image: str, context: Path | None = None) -> ProcessOutput:
+    """Build the sandbox image from `sandbox/`. The only command here that is not read-only, and it only runs when you ask
+    (`orch sandbox build`). The caller prints the outcome."""
+    context = context or dockerfile_dir()
+    if not (context / "Dockerfile").is_file():
+        raise SandboxError(f"no Dockerfile in {context}")
+    clear_cache()  # a new image changes the answer
+    return run_process(build_argv(image, context), cwd=context, env=child_env(), timeout_s=BUILD_TIMEOUT_S)
+
 
 _clock = time.monotonic
 _cache: dict[str, tuple[float, ProbeResult]] = {}

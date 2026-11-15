@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 import signal
 import sys
 import textwrap
@@ -28,6 +29,7 @@ from .theme import demon_label, demon_name, resolve_theme
 from .ui import make_view, render_doctor, render_plain, render_rich
 from . import doctor as doctor_mod
 from . import home as home_mod
+from . import sandbox as sandbox_mod
 from .sandbox import OFF_WARNING
 from .view import build_run_view, duration, fmt_elapsed
 from .plan import format_plan
@@ -652,6 +654,66 @@ def doctor(
     console.print(Text(f"{len(checks)} checks: {bad} failed, {warn} to look at.",
                        style=theme.style("error" if bad else ("warning" if warn else "success"))))  # fmt: skip
     raise typer.Exit(doctor_mod.exit_code(checks))
+
+
+sandbox_app = typer.Typer(help="The Docker sandbox for agent-written tests (see docs/sandbox-design.md).")
+app.add_typer(sandbox_app, name="sandbox")
+
+
+@sandbox_app.command("build")
+def sandbox_build(
+    ctx: typer.Context,
+    image: Optional[str] = typer.Option(None, "--image", help="Image name to build (default: sandbox.image in config.yaml)."),
+) -> None:
+    """Build the sandbox image from the sandbox/ folder. Needs Docker running and network (it pulls python and uv)."""
+    cfg = _load_cfg(ctx.obj, None)
+    name = image or cfg.sandbox.image
+    try:
+        out = sandbox_mod.build_image(name)
+    except sandbox_mod.SandboxError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2)
+    if out.not_found:
+        typer.echo("Error: the docker command was not found on PATH. Install and start Docker Desktop.", err=True)
+        raise typer.Exit(2)
+    if out.timed_out or out.returncode != 0:
+        why = "timed out" if out.timed_out else f"exit {out.returncode}"
+        typer.echo(f"Error: docker build failed ({why}). Last lines:\n{(out.stderr or out.stdout)[-1500:]}", err=True)
+        raise typer.Exit(2)
+    typer.echo(f"Built {name}. Check it with: orch sandbox check")
+
+
+@sandbox_app.command("check")
+def sandbox_check(
+    ctx: typer.Context,
+    repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
+) -> None:
+    """Show whether this repo's tests would run in the sandbox, and the exact docker command. Runs nothing."""
+    session = ctx.obj
+    cfg = _load_cfg(session, None)
+    target = _repo_or_exit(session, repo)
+    label = target.name or str(target.path)
+    if target.sandbox == "off":
+        typer.echo(f"repo {label}: WARNING: {OFF_WARNING}")
+        typer.echo("Nothing to check. To use the sandbox, remove `sandbox: off` for this repo in config.yaml.")
+        return
+    typer.echo(f"repo {label}: sandbox docker, image {target.image}")
+    st = sandbox_mod.status("docker", target.image, fresh=True)
+    if st.state != "ok":
+        typer.echo(f"Docker: {sandbox_mod.unavailable_message(st, label, target.image)}", err=True)
+        raise typer.Exit(2)
+    typer.echo(f"Docker: running (server {st.server}); image present ({st.image_id.removeprefix('sha256:')[:12]})")
+    if not target.test_command:
+        typer.echo("No test_command for this path, so there is no command to show.")
+        return
+    try:
+        argv = sandbox_mod.test_argv(sandbox_mod.Spec.for_repo(target, cfg.sandbox), target.path, shlex.split(target.test_command),
+                                     "dry-run", sandbox_mod.venv_volume_name(target.path, st.image_id), target.env_passthrough)  # fmt: skip
+    except (sandbox_mod.SandboxError, ValueError) as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2)
+    typer.echo("A test run would start (a real run mounts the run's worktree instead of the repo):")
+    typer.echo(shlex.join(argv))
 
 
 @app.command()
