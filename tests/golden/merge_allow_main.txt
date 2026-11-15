@@ -1,6 +1,7 @@
 exit: 0
 --- output ---
 Merged orch/<RUN> into main as <SHA> (not pushed).
+Note: the tests after the merge still run on this machine, not in the sandbox (sandbox Phase 3).
 Tests after merge: PASS (exit 0)
 --- stderr ---
 --- end ---

@@ -39,6 +39,8 @@ from .runs import RunNotFound, find_run, is_stale, list_runs, load_meta, load_pl
 
 app = typer.Typer(help="Orchestrate Claude Code and Antigravity CLIs.")
 
+MERGE_NOTE = "Note: the tests after the merge still run on this machine, not in the sandbox (sandbox Phase 3)."
+
 
 class AgentName(str, Enum):
     claude = "claude"
@@ -609,6 +611,8 @@ def merge(
     target = _repo_or_exit(ctx.obj, repo)
     r = _or_exit(services.merge, target, _find_or_exit(target, run_id), allow_main=allow_main)
     typer.echo(f"Merged {r.branch} into {r.target} as {r.sha[:8]} (not pushed).")
+    if target.sandbox == "docker":
+        typer.echo(MERGE_NOTE)
     if r.tests_passed is None:
         typer.echo(f"Tests after merge: could not run ({r.tests_detail})")
         raise typer.Exit(1)

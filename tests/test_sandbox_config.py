@@ -40,11 +40,12 @@ def test_top_level_defaults():
     assert (cfg.sandbox.image, cfg.sandbox.memory, cfg.sandbox.cpus) == ("orch-sbx:py312", "4g", 4)
 
 
-def test_placeholders_on_the_real_repos_until_phase_2():
-    """Sandbox Phase 2 removes `sandbox: "off"` from config.yaml and flips this test to `== "docker"`."""
+def test_the_real_repos_are_sandboxed():
+    """Phase 2 removed the `sandbox: "off"` placeholders: both repos in config.yaml run their tests in the container."""
     cfg = load_config(CONFIG_FILE)
-    assert cfg.repos["orch"].sandbox == "off"
-    assert cfg.repos["practice"].sandbox == "off"
+    assert cfg.repos["orch"].sandbox == "docker"
+    assert cfg.repos["practice"].sandbox == "docker"
+    assert "off" not in CONFIG_FILE.read_text(encoding="utf-8").replace("# ", "").lower().split("repos:")[1]
 
 
 @pytest.mark.parametrize("written", ["off", '"off"', "'off'"])

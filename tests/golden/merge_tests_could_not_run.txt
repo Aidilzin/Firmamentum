@@ -1,6 +1,7 @@
 exit: 1
 --- output ---
 Merged orch/<RUN> into work as <SHA> (not pushed).
+Note: the tests after the merge still run on this machine, not in the sandbox (sandbox Phase 3).
 Tests after merge: could not run (test command could not run)
 --- stderr ---
 --- end ---

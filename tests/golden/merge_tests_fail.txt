@@ -1,6 +1,7 @@
 exit: 1
 --- output ---
 Merged orch/<RUN> into work as <SHA> (not pushed).
+Note: the tests after the merge still run on this machine, not in the sandbox (sandbox Phase 3).
 Tests after merge: FAIL (exit 1
 1 failed)
 The merge commit is kept. To undo it: git reset --hard <SHA>^ (on work).

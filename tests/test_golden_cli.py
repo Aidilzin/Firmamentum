@@ -5,6 +5,7 @@ import signal
 from datetime import datetime, timedelta, timezone
 
 import pytest
+import yaml
 from git_helpers import git
 from golden_helpers import check, invoke
 from plan_factory import good_plan, step
@@ -535,6 +536,18 @@ def test_merge_passes(g, monkeypatch):
     g[3]("merge_pass", invoke(["merge", run_dir.name, "--repo", "demo"]))
     g[3]("merge_already_merged", invoke(["merge", run_dir.name, "--repo", "demo"]))
     g[3]("status_merged", invoke(["status", run_dir.name, "--repo", "demo"]))
+
+
+def test_the_merge_note_is_for_sandboxed_repos_only(g, tmp_path, monkeypatch):
+    """The goldens above show the note for the default (docker) repo; an explicit `sandbox: off` repo gets none."""
+    run_dir = _done_run(g, monkeypatch)
+    git(g[0], "checkout", "-q", "-b", "work")
+    f = tmp_path / "config.yaml"
+    data = yaml.safe_load(f.read_text(encoding="utf-8"))
+    data["repos"]["demo"]["sandbox"] = "off"
+    f.write_text(yaml.safe_dump(data), encoding="utf-8")
+    r = invoke(["merge", run_dir.name, "--repo", "demo"])
+    assert r.exit_code == 0 and "Merged" in r.output and "Note:" not in r.output
 
 
 def test_merge_into_main_when_allowed(g, monkeypatch):
