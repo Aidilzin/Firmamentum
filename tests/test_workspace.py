@@ -211,3 +211,103 @@ def test_export_tree_unknown_revision(repo, tmp_path):
     with pytest.raises(workspace.WorkspaceError, match="git archive"):
         workspace.export_tree(repo, "no-such-branch", tmp_path / "out")
     assert not (tmp_path / "out").exists()
+
+
+# ---------- merge candidate ----------
+
+
+def _commit_file(where, name, text, msg):
+    (where / name).write_text(text, encoding="utf-8")
+    git(where, "add", "-A")
+    git(where, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", msg)
+    return git(where, "rev-parse", "HEAD").strip()
+
+
+def _two_sides(repo):
+    wt = workspace.create(repo, "proj", "run1")
+    _commit_file(wt.path, "a.py", "a = 1\n", "branch change")
+    git(repo, "checkout", "-q", "-b", "work")
+    _commit_file(repo, "b.py", "b = 1\n", "work change")
+    return wt
+
+
+def test_merge_candidate_is_a_two_parent_commit_and_touches_nothing(repo):
+    _two_sides(repo)
+    target, branch = workspace.commit_sha(repo, "work"), workspace.commit_sha(repo, "orch/run1")
+    before = git(repo, "status", "--porcelain=v1", "--branch")
+    cand = workspace.merge_candidate(repo, target, branch, "Merge orch run: x")
+    assert git(repo, "rev-list", "--parents", "-n1", cand).split() == [cand, target, branch]
+    assert git(repo, "log", "-1", "--format=%s", cand).strip() == "Merge orch run: x"
+    assert git(repo, "ls-tree", "--name-only", cand).split() == [".gitignore", "README.md", "a.py", "b.py"]
+    assert workspace.commit_sha(repo, "work") == target and git(repo, "status", "--porcelain=v1", "--branch") == before
+    assert not (repo / "a.py").exists()  # the checkout never received the branch's file
+
+
+def test_merge_candidate_conflict_names_the_files_and_changes_nothing(repo):
+    wt = workspace.create(repo, "proj", "run1")
+    _commit_file(wt.path, "README.md", "from the branch\n", "branch")
+    git(repo, "checkout", "-q", "-b", "work")
+    _commit_file(repo, "README.md", "from work\n", "work")
+    target, branch = workspace.commit_sha(repo, "work"), workspace.commit_sha(repo, "orch/run1")
+    with pytest.raises(workspace.MergeConflict) as e:
+        workspace.merge_candidate(repo, target, branch, "m")
+    assert e.value.files == ["README.md"] and "README.md" in str(e.value)
+    assert workspace.commit_sha(repo, "work") == target and workspace.is_clean(repo)
+
+
+def test_merge_candidate_refuses_names_that_are_not_full_ids(repo):
+    with pytest.raises(WorkspaceError, match="full commit id"):
+        workspace.merge_candidate(repo, "work", "orch/run1", "m")
+    with pytest.raises(WorkspaceError, match="full commit id"):
+        workspace.add_detached(repo, "proj", "merge-x", "--orphan")
+
+
+def test_is_ancestor(repo):
+    wt = _two_sides(repo)
+    target, branch = workspace.commit_sha(repo, "work"), workspace.commit_sha(repo, "orch/run1")
+    assert not workspace.is_ancestor(repo, branch, target)
+    assert workspace.is_ancestor(repo, wt.base_sha, target) and workspace.is_ancestor(repo, target, target)
+
+
+def test_a_detached_worktree_runs_no_repo_hooks_and_is_removable(repo, tmp_path, isolated_worktree_root):
+    _two_sides(repo)
+    target, branch = workspace.commit_sha(repo, "work"), workspace.commit_sha(repo, "orch/run1")
+    cand = workspace.merge_candidate(repo, target, branch, "m")
+    marker = tmp_path / "checkout-hook-ran.txt"
+    hooks = _hook(repo, "post-checkout", marker)
+    git(repo, "config", "core.hooksPath", str(hooks))
+    tmp = workspace.add_detached(repo, "proj", "merge-run1", cand)
+    assert tmp == isolated_worktree_root / "proj" / "merge-run1" and not marker.exists()
+    assert (tmp / "a.py").is_file() and (tmp / "b.py").is_file()
+    assert git(tmp, "rev-parse", "HEAD").strip() == cand and workspace.current_branch(tmp) is None
+    with pytest.raises(WorkspaceError, match="already exists"):
+        workspace.add_detached(repo, "proj", "merge-run1", cand)
+    assert workspace.remove(repo, "proj", "merge-run1", path=tmp) and not tmp.exists()
+
+
+def test_fast_forward_moves_the_branch_and_runs_no_hooks(repo, tmp_path):
+    _two_sides(repo)
+    target, branch = workspace.commit_sha(repo, "work"), workspace.commit_sha(repo, "orch/run1")
+    cand = workspace.merge_candidate(repo, target, branch, "m")
+    marker = tmp_path / "merge-hook-ran.txt"
+    git(repo, "config", "core.hooksPath", str(_hook(repo, "post-merge", marker)))
+    workspace.fast_forward(repo, cand)
+    assert workspace.commit_sha(repo, "work") == cand and (repo / "a.py").is_file() and not marker.exists()
+
+
+def test_fast_forward_refuses_after_the_target_moved(repo):
+    _two_sides(repo)
+    target, branch = workspace.commit_sha(repo, "work"), workspace.commit_sha(repo, "orch/run1")
+    cand = workspace.merge_candidate(repo, target, branch, "m")
+    moved = _commit_file(repo, "c.py", "c = 1\n", "you committed meanwhile")
+    with pytest.raises(WorkspaceError, match="fast-forward refused"):
+        workspace.fast_forward(repo, cand)
+    assert workspace.commit_sha(repo, "work") == moved
+
+
+def test_git_version_reads_major_and_minor(monkeypatch):
+    class P:
+        stdout = "git version 2.56.0.windows.4\n"
+
+    monkeypatch.setattr(workspace.subprocess, "run", lambda *a, **k: P())
+    assert workspace.git_version() == (2, 56)

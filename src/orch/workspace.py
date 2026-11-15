@@ -318,3 +318,90 @@ def merge_no_ff(repo: Path, branch: str, message: str) -> str:
         git(repo, "merge", "--abort", check=False)
         raise WorkspaceError(f"merge of {branch} failed and was aborted: {(p.stderr or p.stdout).strip()[:500]}")
     return git(repo, "rev-parse", "HEAD").stdout.strip()
+
+
+# ---------- merge candidate: build and test the merge result before the branch moves ----------
+
+MIN_GIT = (2, 38)  # `git merge-tree --write-tree`
+_SHA = re.compile(r"[0-9a-f]{40}([0-9a-f]{24})?")
+
+
+class MergeConflict(WorkspaceError):
+    """The two sides do not merge cleanly. Nothing was changed. `files` are the conflicted paths."""
+
+    def __init__(self, files: list[str]):
+        self.files = files
+        super().__init__("merge conflict in: " + (", ".join(files) or "(git named no file)"))
+
+
+def _full_sha(sha: str) -> str:
+    if not _SHA.fullmatch(sha or ""):
+        raise WorkspaceError(f"not a full commit id: {sha!r}")
+    return sha
+
+
+def commit_sha(repo: Path, rev: str) -> str:
+    """The full commit id of a branch name or revision."""
+    if not _REV.fullmatch(rev or ""):
+        raise WorkspaceError(f"bad revision {rev!r}")
+    return git(repo, "rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}").stdout.strip()
+
+
+def is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    """True when `descendant` already contains `ancestor`."""
+    p = git(repo, "merge-base", "--is-ancestor", _full_sha(ancestor), _full_sha(descendant), check=False)
+    if p.returncode not in (0, 1):
+        raise WorkspaceError(f"git merge-base --is-ancestor failed ({p.returncode}): {p.stderr.strip()}")
+    return p.returncode == 0
+
+
+def merge_candidate(repo: Path, target_sha: str, branch_sha: str, message: str) -> str:
+    """The commit a `--no-ff` merge of `branch_sha` into `target_sha` would make, built with `git merge-tree` and
+    `git commit-tree`: no checkout, index, ref or hook is touched. Raises MergeConflict when it does not merge cleanly."""
+    repo = Path(repo)
+    _full_sha(target_sha)
+    _full_sha(branch_sha)
+    p = git(repo, "merge-tree", "--write-tree", "--name-only", "--no-messages", "-z", target_sha, branch_sha, check=False)
+    parts = [x for x in p.stdout.split("\0") if x]
+    if p.returncode == 1 and parts and _SHA.fullmatch(parts[0]):
+        raise MergeConflict(sorted(set(parts[1:])))
+    if p.returncode != 0 or not parts or not _SHA.fullmatch(parts[0]):
+        why = (p.stderr or p.stdout).strip()[:300]
+        raise WorkspaceError(f"git merge-tree failed ({p.returncode}; it needs git {MIN_GIT[0]}.{MIN_GIT[1]} or newer): {why}")
+    out = git(repo, *_identity_args(repo), "commit-tree", parts[0], "-p", target_sha, "-p", branch_sha, "-m", message)
+    return out.stdout.strip()
+
+
+def merge_worktree_path(repo_name: str, name: str) -> Path:
+    return worktree_root() / _safe_name(repo_name) / _safe_name(name)
+
+
+def add_detached(repo: Path, repo_name: str, name: str, sha: str) -> Path:
+    """A throwaway linked worktree of commit `sha` under the orch worktree root, on no branch. Repo hooks do not run
+    (a tracked hooks folder would make `post-checkout` agent-written code). Remove it with `remove(..., path=...)`."""
+    repo = Path(repo).resolve()
+    wt = merge_worktree_path(repo_name, name)
+    if wt.exists():
+        raise WorkspaceError(f"worktree path already exists: {wt}")
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    git(repo, "worktree", "prune", check=False)  # forget a registration whose folder is gone
+    git(repo, *_no_hooks_args(), "worktree", "add", "--detach", str(wt), _full_sha(sha))
+    return wt
+
+
+def fast_forward(repo: Path, sha: str) -> None:
+    """`git merge --ff-only <sha>` in the checkout, without repo hooks. Refuses (WorkspaceError, nothing changed) when
+    the current branch is no longer an ancestor of `sha` or a local change is in the way."""
+    p = git(Path(repo), *_no_hooks_args(), "merge", "--ff-only", _full_sha(sha), check=False)
+    if p.returncode != 0:
+        raise WorkspaceError(f"fast-forward refused: {(p.stderr or p.stdout).strip()[:300]}")
+
+
+def git_version() -> tuple[int, int] | None:
+    """(major, minor) of the git on PATH, or None when it cannot be read."""
+    try:
+        out = subprocess.run(["git", "--version"], capture_output=True, text=True, check=False).stdout
+    except OSError:
+        return None
+    m = re.search(r"(\d+)\.(\d+)", out)
+    return (int(m.group(1)), int(m.group(2))) if m else None
