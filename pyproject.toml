@@ -25,3 +25,6 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.2.0",
 ]
+
+[tool.pytest.ini_options]
+markers = ["slow: makes a git repo or runs the executor (deselect with -m 'not slow')"]
