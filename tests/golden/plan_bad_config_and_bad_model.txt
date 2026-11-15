@@ -1,0 +1,20 @@
+exit: 2
+--- output ---
+Error: invalid YAML in <TMP>/broken.yaml: while parsing a flow sequence
+  in "<unicode string>", line 1, column 6:
+    not: [valid
+         ^
+expected ',' or ']', but got '<stream end>'
+  in "<unicode string>", line 1, column 12:
+    not: [valid
+               ^
+--- stderr ---
+Error: invalid YAML in <TMP>/broken.yaml: while parsing a flow sequence
+  in "<unicode string>", line 1, column 6:
+    not: [valid
+         ^
+expected ',' or ']', but got '<stream end>'
+  in "<unicode string>", line 1, column 12:
+    not: [valid
+               ^
+--- end ---

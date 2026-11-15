@@ -271,6 +271,16 @@ def test_plan_bad_model_and_bad_repo(g, monkeypatch):
     assert fb.requests == []
 
 
+def test_plan_bad_config_and_bad_model(g, tmp_path, monkeypatch):
+    """The config error is reported first; a bad --model is never looked at (D7: the Session must keep this order)."""
+    fb = fakes(monkeypatch, [])
+    bad = tmp_path / "broken.yaml"
+    bad.write_text("not: [valid", encoding="utf-8")
+    monkeypatch.setenv("ORCH_CONFIG", str(bad))
+    g[3]("plan_bad_config_and_bad_model", invoke(["plan", "x", "--repo", "demo", "--model", "nobody=x"]))
+    assert fb.requests == []
+
+
 def test_run_plans_and_executes_to_done(g, monkeypatch):
     fb = fakes(monkeypatch, [planner(ONE), edit({"src/s1.py": "a = 1\n"})])
     g[3]("run_done", invoke(["run", "do it", "--repo", "demo"]))

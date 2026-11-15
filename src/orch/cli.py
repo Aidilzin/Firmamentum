@@ -21,9 +21,10 @@ from rich.text import Text
 from .adapters import AgentAdapter, AgentRequest, AntigravityAdapter, ClaudeCodeAdapter
 from . import budget
 from .budget import run_agent, summary, summary_by_model
-from .config import ConfigError, apply_overrides, load_config, resolve_repo
+from .config import ConfigError
 from . import services, versions
-from .theme import current_theme, demon_label, demon_name, resolve_theme, set_theme
+from .session import Session
+from .theme import current_theme, demon_label, demon_name, set_theme
 from .ui import make_view, render_doctor, render_plain, render_rich
 from . import doctor as doctor_mod
 from . import home as home_mod
@@ -52,24 +53,23 @@ def _main(
     ascii_: bool = typer.Option(False, "--ascii", help="ASCII glyphs only (automatic when the terminal cannot show the star glyphs)."),
 ) -> None:
     """Choose the theme; with no subcommand, show the home screen."""
-    cfg, cfg_error = None, None
+    session = Session(theme=theme, ascii_=ascii_)  # a config that cannot be loaded is kept as session.config_error
+    ctx.obj = session
     try:
-        cfg = load_config()
-    except ConfigError as e:
-        cfg_error = str(e)
-    try:
-        set_theme(resolve_theme(theme, ascii_, cfg.ui.theme if cfg else None))
+        set_theme(session.theme)
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
     if ctx.invoked_subcommand is None:
         console = Console()
-        for line in home_mod.render_home(home_mod.build_home(cfg, config_error=cfg_error), current_theme()):
+        data = home_mod.build_home(session.config_or_none, session.db_path, config_error=session.config_error)
+        for line in home_mod.render_home(data, session.theme):
             console.print(line)
 
 
 @app.command()
 def ask(
+    ctx: typer.Context,
     agent: AgentName = typer.Option(..., "--agent", help="Which CLI to use."),
     prompt: Optional[str] = typer.Option(None, "--prompt", help="Prompt text."),
     file: Optional[Path] = typer.Option(None, "--file", help="Read the prompt from a file."),
@@ -82,7 +82,7 @@ def ask(
         raise typer.Exit(2)
     text = prompt if prompt is not None else file.read_text(encoding="utf-8")  # type: ignore[union-attr]
     request = AgentRequest(prompt=text, cwd=cwd.resolve(), model=model)
-    result = run_agent(get_adapter(agent), request)
+    result = run_agent(get_adapter(agent), request, ctx.obj.db_path)
     if json_out:
         typer.echo(result.model_dump_json(indent=2))
     else:
@@ -106,6 +106,7 @@ def version() -> None:
 
 @app.command()
 def usage(
+    ctx: typer.Context,
     days: int = typer.Option(7, "--days", help="Look back this many days."),
     window: Optional[str] = typer.Option(None, "--window", help="Look back this long instead, e.g. 5h, 24h, 7d, 30m."),
     json_out: bool = typer.Option(False, "--json", help="Print the summary as JSON."),
@@ -122,9 +123,10 @@ def usage(
     else:
         delta, label = timedelta(days=days), f"{days} day(s)"
     since = now - delta
-    rows = summary(since)
-    by_model = summary_by_model(since)
-    cancelled = budget.unknown_token_calls(since)
+    db = ctx.obj.db_path
+    rows = summary(since, db)
+    by_model = summary_by_model(since, db)
+    cancelled = budget.unknown_token_calls(since, db)
     if json_out:
         payload = {
             "days": days,
@@ -171,15 +173,16 @@ def _local(dt: datetime) -> str:
 
 @app.command()
 def cooldowns(
+    ctx: typer.Context,
     agent: Optional[AgentName] = typer.Argument(None, help="With --clear: only this agent."),
     clear: bool = typer.Option(False, "--clear", help="Remove cooldowns (all, or only AGENT's)."),
 ) -> None:
     """List active cooldowns; --clear [agent] removes them (when you know the limit has reset)."""
     if clear:
-        n = budget.clear_cooldowns(agent.value if agent else None)
+        n = budget.clear_cooldowns(agent.value if agent else None, ctx.obj.db_path)
         typer.echo(f"Cleared {n} cooldown(s)" + (f" for {agent.value}." if agent else "."))
         return
-    items = budget.active_cooldowns()
+    items = budget.active_cooldowns(db_path=ctx.obj.db_path)
     if not items:
         typer.echo("(no active cooldowns)")
     for c in items:
@@ -206,9 +209,10 @@ def _print_plan(r: services.PlanResult, *, summary: bool, details: bool = False)
         raise typer.Exit(r.exit_code)
 
 
-def _repo_or_exit(cfg, repo_arg):
+def _repo_or_exit(session: Session, repo_arg):
+    session.config  # a config that cannot be loaded propagates from here, as load_config() did before the Session
     try:
-        return resolve_repo(cfg, repo_arg)
+        return session.repo(repo_arg)
     except ConfigError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
@@ -216,28 +220,27 @@ def _repo_or_exit(cfg, repo_arg):
 
 @app.command()
 def plan(
+    ctx: typer.Context,
     request: str = typer.Argument(..., help="What you want done."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     scout: bool = typer.Option(False, "--scout", help="Run the scout role first (costs extra quota)."),
     model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
 ) -> None:
     """Ask the Planner for a plan and store it under .orch/runs/."""
-    try:
-        cfg = apply_overrides(load_config(), model or [])
-    except ConfigError as e:
-        typer.echo(f"Error: {e}", err=True)
-        raise typer.Exit(2)
-    target = _repo_or_exit(cfg, repo)
-    r = _planning(services.plan_run, request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout)
+    session = ctx.obj
+    cfg = _load_cfg(session, model)
+    target = _repo_or_exit(session, repo)
+    r = _planning(services.plan_run, request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout,
+                  db_path=session.db_path)  # fmt: skip
     _print_plan(r, summary=True, details=True)
     for n in r.next:
         typer.echo(f"Next: {n}")
 
 
 @app.command()
-def runs(repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path.")) -> None:
+def runs(ctx: typer.Context, repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path.")) -> None:
     """List stored runs, newest first."""
-    target = _repo_or_exit(load_config(), repo)
+    target = _repo_or_exit(ctx.obj, repo)
     items = list_runs(target.path)
     if not items:
         typer.echo("(no runs)")
@@ -247,11 +250,12 @@ def runs(repo: Optional[str] = typer.Option(None, "--repo", help="Configured rep
 
 @app.command()
 def show(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path."),
 ) -> None:
     """Print a stored plan."""
-    target = _repo_or_exit(load_config(), repo)
+    target = _repo_or_exit(ctx.obj, repo)
     try:
         d = find_run(target.path, run_id)
     except RunNotFound as e:
@@ -282,9 +286,10 @@ def _or_exit(fn, *args, **kw):
         raise typer.Exit(e.code)
 
 
-def _load_cfg(model: list[str] | None):
+def _load_cfg(session: Session, model: list[str] | None):
     try:
-        return apply_overrides(load_config(), model or [])
+        session.set_overrides(model or [])
+        return session.config
     except ConfigError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
@@ -360,11 +365,11 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def _emit_status(run_dir: Path, repo_name: str | None = None, header: bool = True) -> None:
+def _emit_status(run_dir: Path, repo_name: str | None = None, header: bool = True, theme=None) -> None:
     """Constellation + demon lines (coloured on a terminal, plain otherwise), then the detailed step table."""
     view = build_run_view(load_meta(run_dir)) if header else None
     if view is not None and (view.steps or view.demons):  # a run that has not started has nothing to draw
-        theme = current_theme()
+        theme = theme or current_theme()
         if sys.stdout.isatty():
             Console().print(render_rich(view, theme, with_footer=False))
         else:
@@ -444,10 +449,12 @@ def _planning(fn, *args, **kw) -> services.PlanResult:
         _restore_sigint(previous)
 
 
-def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None, **kw) -> None:
-    view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()}, current_theme())
+def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None,
+           theme=None, db_path: Path | None = None, **kw) -> None:  # fmt: skip
+    theme = theme or current_theme()
+    view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()}, theme)
     ex = services.build_executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
-                                 on_event=view.on_event if view.live else None, hidden_tests=hidden_tests)  # fmt: skip
+                                 on_event=view.on_event if view.live else None, hidden_tests=hidden_tests, db_path=db_path)  # fmt: skip
     previous = _install_sigint(ex)
     try:
         with view:
@@ -458,7 +465,7 @@ def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = Fals
     finally:
         _restore_sigint(previous)
     typer.echo("")
-    _emit_status(run_dir, target.name, header=not view.live)
+    _emit_status(run_dir, target.name, header=not view.live, theme=theme)
     typer.echo(f"\nResult: {_result_text(outcome)}")
     nxt = next_commands(run_dir, target.name)
     for n in nxt:
@@ -469,6 +476,7 @@ def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = Fals
 
 @app.command("exec")
 def exec_cmd(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     model: Optional[list[str]] = typer.Option(None, "--model", help="role=model, repeatable."),
@@ -476,13 +484,16 @@ def exec_cmd(
     hidden_tests: Optional[Path] = HIDDEN_OPT,
 ) -> None:
     """Execute a stored plan in a new git worktree (no merge)."""
-    cfg = _load_cfg(model)
-    target = _repo_or_exit(cfg, repo)
-    _drive(target, _find_or_exit(target, run_id), cfg, "start", plain=plain, hidden_tests=hidden_tests)
+    session = ctx.obj
+    cfg = _load_cfg(session, model)
+    target = _repo_or_exit(session, repo)
+    _drive(target, _find_or_exit(target, run_id), cfg, "start", plain=plain, hidden_tests=hidden_tests,
+           theme=session.theme, db_path=session.db_path)  # fmt: skip
 
 
 @app.command()
 def resume(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     force: bool = typer.Option(False, "--force", help="Resume even if resume_after is still in the future."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
@@ -490,18 +501,20 @@ def resume(
     plain: bool = PLAIN_OPT,
 ) -> None:
     """Continue a started run from its first unfinished step."""
-    cfg = _load_cfg(model)
-    target = _repo_or_exit(cfg, repo)
+    session = ctx.obj
+    cfg = _load_cfg(session, model)
+    target = _repo_or_exit(session, repo)
     run_dir = _find_or_exit(target, run_id)
     after = services.resume_blocked_until(load_meta(run_dir), force)
     if after is not None:
         typer.echo(f"Run is paused until {_local(after)} (usage limit). Use --force to try earlier.", err=True)
         raise typer.Exit(3)
-    _drive(target, run_dir, cfg, "resume", plain=plain)
+    _drive(target, run_dir, cfg, "resume", plain=plain, theme=session.theme, db_path=session.db_path)
 
 
 @app.command()
 def run(
+    ctx: typer.Context,
     request: str = typer.Argument(..., help="What you want done."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
     scout: bool = typer.Option(False, "--scout", help="Run the scout role first (costs extra quota)."),
@@ -510,16 +523,19 @@ def run(
     hidden_tests: Optional[Path] = HIDDEN_OPT,
 ) -> None:
     """Plan, then execute, in one go."""
-    cfg = _load_cfg(model)
-    target = _repo_or_exit(cfg, repo)
+    session = ctx.obj
+    cfg = _load_cfg(session, model)
+    target = _repo_or_exit(session, repo)
     _or_exit(services.check_run_request, target, hidden_tests)  # refuse before any quota is spent
-    r = _planning(services.plan_run, request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout)
+    r = _planning(services.plan_run, request, target, cfg, lambda name: get_adapter(AgentName(name)), scout=scout,
+                  db_path=session.db_path)  # fmt: skip
     _print_plan(r, summary=False)
-    _drive(target, r.run_dir, cfg, "start", plain=plain, hidden_tests=hidden_tests)
+    _drive(target, r.run_dir, cfg, "start", plain=plain, hidden_tests=hidden_tests, theme=session.theme, db_path=session.db_path)
 
 
 @app.command()
 def approve(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     step: Optional[str] = typer.Option(None, "--step", help="Step id, e.g. s2 (optional if only one waits)."),
     retry: bool = typer.Option(False, "--retry", help="After repair rounds ran out: grant another set of rounds."),
@@ -528,25 +544,30 @@ def approve(
     plain: bool = PLAIN_OPT,
 ) -> None:
     """Approve a step that is awaiting approval, then continue the run."""
-    cfg = _load_cfg(model)
-    target = _repo_or_exit(cfg, repo)
-    _drive(target, _find_or_exit(target, run_id), cfg, "approve", plain=plain, step_id=step, retry=retry)
+    session = ctx.obj
+    cfg = _load_cfg(session, model)
+    target = _repo_or_exit(session, repo)
+    _drive(target, _find_or_exit(target, run_id), cfg, "approve", plain=plain, theme=session.theme, db_path=session.db_path,
+           step_id=step, retry=retry)  # fmt: skip
 
 
 @app.command()
 def reject(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     step: str = typer.Option(..., "--step", help="Step id, e.g. s2."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
 ) -> None:
     """Reject a step and stop the run."""
-    cfg = _load_cfg(None)
-    target = _repo_or_exit(cfg, repo)
-    _drive(target, _find_or_exit(target, run_id), cfg, "reject", step_id=step)
+    session = ctx.obj
+    cfg = _load_cfg(session, None)
+    target = _repo_or_exit(session, repo)
+    _drive(target, _find_or_exit(target, run_id), cfg, "reject", theme=session.theme, db_path=session.db_path, step_id=step)
 
 
 @app.command()
 def answer(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     text: str = typer.Argument(..., help="Your answer."),
     step: Optional[str] = typer.Option(None, "--step", help="Step id (optional if only one step waits)."),
@@ -555,27 +576,30 @@ def answer(
     plain: bool = PLAIN_OPT,
 ) -> None:
     """Answer a question: re-plan (plan needs input) or re-run the step (step needs input)."""
-    cfg = _load_cfg(model)
-    target = _repo_or_exit(cfg, repo)
+    session = ctx.obj
+    cfg = _load_cfg(session, model)
+    target = _repo_or_exit(session, repo)
     run_dir = _find_or_exit(target, run_id)
     meta = load_meta(run_dir)
     if not meta.get("steps") and step is None and meta.get("status") == "needs_input":
-        r = _or_exit(_planning, services.answer_plan, target, cfg, run_dir, text, lambda name: get_adapter(AgentName(name)))
+        r = _or_exit(_planning, services.answer_plan, target, cfg, run_dir, text, lambda name: get_adapter(AgentName(name)),
+                     db_path=session.db_path)  # fmt: skip
         _print_plan(r, summary=True)
         for n in r.next:
             typer.echo(f"Next: {n}")
         return
-    _drive(target, run_dir, cfg, "answer", plain=plain, step_id=step, text=text)
+    _drive(target, run_dir, cfg, "answer", plain=plain, theme=session.theme, db_path=session.db_path, step_id=step, text=text)
 
 
 @app.command()
 def merge(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     allow_main: bool = typer.Option(False, "--allow-main", help="Allow merging into main/master."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
 ) -> None:
     """Merge the run's branch into the main repo's current branch (--no-ff), then run the tests. Never pushes."""
-    target = _repo_or_exit(load_config(), repo)
+    target = _repo_or_exit(ctx.obj, repo)
     r = _or_exit(services.merge, target, _find_or_exit(target, run_id), allow_main=allow_main)
     typer.echo(f"Merged {r.branch} into {r.target} as {r.sha[:8]} (not pushed).")
     if r.tests_passed is None:
@@ -589,22 +613,27 @@ def merge(
 
 @app.command()
 def status(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path."),
 ) -> None:
     """Step table: status, tokens, test result, commit."""
-    target = _repo_or_exit(load_config(), repo)
-    _emit_status(_find_or_exit(target, run_id), target.name)
+    target = _repo_or_exit(ctx.obj, repo)
+    _emit_status(_find_or_exit(target, run_id), target.name, theme=ctx.obj.theme)
 
 
 @app.command()
 def doctor(
+    ctx: typer.Context,
     live: bool = typer.Option(False, "--live", help="Also make one tiny 'Reply PONG' call per CLI (uses a little plan quota)."),
 ) -> None:
     """Check the setup: tools, logins, leftover env vars, config, repos, paths. Exit 1 if anything is wrong."""
-    theme = current_theme()
+    theme = ctx.obj.theme
     console = Console()
-    checks = doctor_mod.run_checks(doctor_mod.Context())
+    dctx = doctor_mod.Context()
+    if dctx.db_path is None:
+        dctx.db_path = ctx.obj.db_path  # the same file doctor would pick by default
+    checks = doctor_mod.run_checks(dctx)
     if live:
         typer.echo("--live makes one tiny call to claude (sonnet) and one to agy; each costs ~13k-20k tokens of plan quota.")
         if typer.confirm("Make the calls?", default=False):
@@ -623,23 +652,25 @@ def doctor(
 
 @app.command()
 def diff(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     step: Optional[str] = typer.Option(None, "--step", help="Only this step, e.g. s1."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path."),
 ) -> None:
     """Show the diff of a run (base..branch) or of one step."""
-    target = _repo_or_exit(load_config(), repo)
+    target = _repo_or_exit(ctx.obj, repo)
     for part in _or_exit(services.diff_run, target, _find_or_exit(target, run_id), step):
         typer.echo((part.header or "") + part.text)
 
 
 @app.command()
 def clean(
+    ctx: typer.Context,
     run_id: str = typer.Argument(..., help="Run id or a unique prefix."),
     repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path."),
 ) -> None:
     """Remove the run's worktree. The branch is kept."""
-    target = _repo_or_exit(load_config(), repo)
+    target = _repo_or_exit(ctx.obj, repo)
     r = _or_exit(services.clean_run, target, _find_or_exit(target, run_id))
     if not r.executed:
         typer.echo("Nothing to clean: the run was never executed.")
