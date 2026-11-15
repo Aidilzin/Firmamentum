@@ -27,7 +27,7 @@ All read-only commands; no credential file was opened.
 | --- | --- | --- |
 | Windows edition | Windows 11 **Home** Single Language, build 26300 | Windows Sandbox needs Pro, Enterprise or Education |
 | WSL | 2.6.3, default version 2, only distro is `docker-desktop` (stopped) | WSL2 option needs a new distro; Docker's backend is already there |
-| Docker | Docker Desktop installed, client 29.6.1, **engine not running** during the check | Lowest setup cost of the four; must be started before a run |
+| Docker | Docker Desktop installed, client 29.6.1 at design time (29.9.3 in Phase 0), **engine not running** during the first check, running on the **WSL2 backend** in Phase 0 | Lowest setup cost of the four; must be started before a run |
 | RAM | 15.2 GB | Docker Desktop's VM takes a visible share of it (estimate 2 to 4 GB) |
 | Git | 2.56, `credential.helper=manager`, `origin` is an https GitHub URL | `git push` works silently from any process running as you. This is C1's worst case |
 | `~/.claude` | contains `.credentials.json` (listed by name only) | On Windows the Pro login is a file in your profile, readable by any process running as you |
@@ -35,7 +35,7 @@ All read-only commands; no credential file was opened.
 | `C:\projects` ACL | `Authenticated Users: Modify`, inherited | A second local user could read **and write** `C:\projects\orch`, hooks included (matters for option 3) |
 | Worktree root ACL | `%LOCALAPPDATA%\orch`: you, SYSTEM, Administrators only | A second local user could not reach the worktrees at all |
 | Your account | member of Administrators (UAC split token) | Nothing here needs elevation except option 3's setup |
-| orch source | Windows-only branches in `runlock.py`, `process.py`, `workspace.py`, `budget.py`, `doctor.py`; 4 platform mentions in `tests/` | orch's own suite has never run on Linux. Unknown whether all 320 tests pass there |
+| orch source | Windows-only branches in `runlock.py`, `process.py`, `workspace.py`, `budget.py`, `doctor.py`; 4 platform mentions in `tests/` | orch's own suite has never run on Linux. Phase 0: 529 of 531 pass on Linux, 1 skip (Windows file sharing), 1 failure (case-sensitive protected paths, fixed in `c089387`) |
 
 ## The login problem (why "put claude in the box" is not the first step)
 
@@ -73,7 +73,7 @@ container can see `~/.claude`.
 | uv cache | Separate Linux cache | Rebuilt on every start | Separate per-user cache and Python | Named volume |
 | Windows paths | Worktree must live on ext4; every `workspace.py` call would go through `wsl git` or a `\\wsl.localhost\` UNC path | Mapped folders | **Unchanged** | Unchanged on the host; `/work` inside |
 | Tests run on | Linux | Windows | **Windows** | Linux |
-| Speed (estimates) | Fast on ext4; 1 to 2 s to wake a stopped distro | Tens of seconds per start, one instance at a time | Native | 1 to 3 s per run plus a copy of the tree; Docker Desktop must be up |
+| Speed (estimates) | Fast on ext4; 1 to 2 s to wake a stopped distro | Tens of seconds per start, one instance at a time | Native | measured 0.6 s warm start; orch's full suite 23 s with `-n 4`; Docker Desktop must be up |
 | Setup cost for you | Medium: distro, `wsl.conf`, users, toolchain, keep it hardened | Windows Pro licence | High: user, password storage, ACL audit, moved worktree root | **Low: start Docker, build one image** |
 | Code cost in orch | High (worktree across the boundary) | High (no pipes, results through a folder) | High (spawn as another user) | **Low (an argv prefix)** |
 
@@ -163,6 +163,7 @@ docker run --rm --label orch.run=<run_id>
   --mount type=bind,src=<worktree>,dst=/src,readonly
   --mount type=volume,src=orch-venv-<key>,dst=/venv,readonly
   -e UV_PROJECT_ENVIRONMENT=/venv -e UV_NO_SYNC=1 -e UV_OFFLINE=1 -e UV_PYTHON_DOWNLOADS=never
+  -e UV_CACHE_DIR=/tmp/uvc          # offline runs still need a writable cache dir on the read-only root
   -w /work orch-sbx:<tag> <test command argv>
 ```
 
@@ -189,7 +190,7 @@ repos:
 ```
 
 The image is a small `sandbox/Dockerfile` in this repo: `python:3.12-slim`, a pinned `uv`, `git` (orch's own tests create
-scratch repos), a non-root user, the entry script. A PHP repo later gets its own image name in config.
+scratch repos), `rsync` (the entry script's copy needs `--exclude`), a non-root user, the entry script. A PHP repo later gets its own image name in config.
 
 ### The warm step (the only place with network)
 
@@ -198,7 +199,8 @@ access to the venv volume, and runs `uv sync --frozen` on **trusted content only
 which you approved the dependency change. The volume name carries a hash of `pyproject.toml`, `uv.lock` and the image
 id, so an unchanged project reuses it.
 
-The warm step also mounts a named volume `orch-uv-cache` as uv's cache, so a new venv volume (after a dependency
+The warm step sets `UV_LINK_MODE=copy` (the cache and venv volumes are different filesystems, so hardlinks fail with a
+warning). It also mounts a named volume `orch-uv-cache` as uv's cache, so a new venv volume (after a dependency
 change or an image rebuild) is filled from the cache instead of downloading everything again. Test runs never download
 at all: they are offline and use the prepared `/venv`, so a repair round costs only the container start and the copy.
 
