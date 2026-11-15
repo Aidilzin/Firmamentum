@@ -610,7 +610,8 @@ def merge(
     On a failure your branch and working tree are untouched. Never pushes."""
     target = _repo_or_exit(ctx.obj, repo)
     run_dir = _find_or_exit(target, run_id)
-    r = _or_exit(services.merge, target, run_dir, allow_main=allow_main, log=lambda m: typer.echo(m, err=True))
+    cfg = _load_cfg(ctx.obj, None)
+    r = _or_exit(services.merge, target, run_dir, allow_main=allow_main, cfg=cfg, log=lambda m: typer.echo(m, err=True))
     if r.outcome == "already":
         typer.echo(f"{r.branch} is already part of {r.target}; recorded {r.sha[:8]}. No tests were run.")
         return
@@ -618,7 +619,8 @@ def merge(
         typer.echo(f"Stopped by you. Nothing was merged; {r.target} is still at {r.target_sha[:8]}.", err=True)
         raise typer.Exit(130)
     if r.outcome == "cannot_run":
-        typer.echo(f"Tests on the merge result: could not run ({r.tests_detail}). Nothing was merged.", err=True)
+        what = "SANDBOX ERROR" if target.sandbox == "docker" else "Tests on the merge result: could not run"
+        typer.echo(f"{what}: {r.tests_detail}. Nothing was merged.", err=True)
         raise typer.Exit(2)
     if r.outcome == "tests_failed":
         typer.echo(f"Tests on the merge result: FAIL ({r.tests_detail})")

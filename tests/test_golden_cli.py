@@ -538,8 +538,8 @@ def test_merge_passes(g, monkeypatch):
     g[3]("status_merged", invoke(["status", run_dir.name, "--repo", "demo"]))
 
 
-def test_the_merge_note_is_for_sandboxed_repos_only(g, tmp_path, monkeypatch):
-    """The goldens above show the note for the default (docker) repo; an explicit `sandbox: off` repo gets none."""
+def test_the_merge_says_where_the_tests_run(g, tmp_path, monkeypatch):
+    """A docker repo tests the merge result in the sandbox; an explicit `sandbox: off` repo says so, in words."""
     run_dir = _done_run(g, monkeypatch)
     git(g[0], "checkout", "-q", "-b", "work")
     f = tmp_path / "config.yaml"
@@ -547,7 +547,8 @@ def test_the_merge_note_is_for_sandboxed_repos_only(g, tmp_path, monkeypatch):
     data["repos"]["demo"]["sandbox"] = "off"
     f.write_text(yaml.safe_dump(data), encoding="utf-8")
     r = invoke(["merge", run_dir.name, "--repo", "demo"])
-    assert r.exit_code == 0 and "Merged" in r.output and "Note:" not in r.output
+    assert r.exit_code == 0 and "Merged" in r.output
+    assert "sandbox: off (tests run on this machine, unconfined)" in r.stderr and "on this machine; work" in r.stderr
 
 
 def test_merge_into_main_when_allowed(g, monkeypatch):

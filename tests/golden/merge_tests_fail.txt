@@ -1,11 +1,11 @@
 exit: 1
 --- output ---
-testing the merge result; work is not touched until the tests pass
+testing the merge result in the sandbox; work is not touched until the tests pass
 Tests on the merge result: FAIL (exit 1
 1 failed)
 Nothing was merged; work is still at <SHA>.
 Full test output: <TMP>/proj/.orch/runs/<RUN>/merge-tests.txt
 To merge anyway: read `orch diff <RUN>` first, then `git merge --no-ff orch/<RUN>`. That manual merge runs this repo's git hooks on this machine.
 --- stderr ---
-testing the merge result; work is not touched until the tests pass
+testing the merge result in the sandbox; work is not touched until the tests pass
 --- end ---

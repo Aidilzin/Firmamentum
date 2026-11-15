@@ -1,8 +1,8 @@
 exit: 2
 --- output ---
-testing the merge result; work is not touched until the tests pass
-Tests on the merge result: could not run (test command could not run). Nothing was merged.
+testing the merge result in the sandbox; work is not touched until the tests pass
+SANDBOX ERROR: test command not found in the sandbox image. Nothing was merged.
 --- stderr ---
-testing the merge result; work is not touched until the tests pass
-Tests on the merge result: could not run (test command could not run). Nothing was merged.
+testing the merge result in the sandbox; work is not touched until the tests pass
+SANDBOX ERROR: test command not found in the sandbox image. Nothing was merged.
 --- end ---

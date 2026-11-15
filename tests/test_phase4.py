@@ -610,7 +610,7 @@ def test_a_timeout_counts_as_a_failure_and_a_missing_command_as_could_not_run(do
     from orch.adapters.process import ProcessOutput
 
     monkeypatch.setattr(merge_mod, "run_process", lambda *a, **k: ProcessOutput(timed_out=True))
-    r = merge_run(rr, run_dir)
+    r = merge_run(rr.model_copy(update={"sandbox": "off"}), run_dir)
     assert r.outcome == "tests_failed" and "timed out" in r.tests_detail
     assert git(repo, "log", "-1", "--format=%s").strip() == "init"
 

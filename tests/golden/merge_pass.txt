@@ -1,8 +1,8 @@
 exit: 0
 --- output ---
-testing the merge result; work is not touched until the tests pass
+testing the merge result in the sandbox; work is not touched until the tests pass
 Tests on the merge result: PASS (exit 0)
 Merged orch/<RUN> into work as <SHA> (not pushed).
 --- stderr ---
-testing the merge result; work is not touched until the tests pass
+testing the merge result in the sandbox; work is not touched until the tests pass
 --- end ---

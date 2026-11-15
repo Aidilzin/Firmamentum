@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from . import workspace
+from . import sandbox, workspace
 from .adapters.process import child_env, run_process
-from .config import ResolvedRepo
+from .config import ResolvedRepo, SandboxConfig
 from .runs import load_meta, write_meta
 
 PROTECTED_BRANCHES = ("main", "master")
@@ -77,14 +77,40 @@ def _run_on_host(repo: ResolvedRepo, argv: list[str], command: str, folder: Path
     return TestOutcome("ran", out.returncode, text, f"exit {out.returncode}" + (f"\n{tail}" if tail else ""))
 
 
-def _run_tests(repo: ResolvedRepo, argv: list[str], command: str, folder: Path, run_id: str,
+def _run_in_sandbox(repo: ResolvedRepo, cfg: SandboxConfig, argv: list[str], command: str, folder: Path, run_id: str,
+                    cancel: threading.Event | None, log: Callable[[str], None]) -> TestOutcome:  # fmt: skip
+    """The candidate worktree is mounted read-only in a container with no network, the same path a run's own tests take.
+    A problem with the sandbox itself is `cannot_run` (never a test failure), so nothing is merged either way."""
+    try:
+        gone = sandbox.sweep(run_id, log)  # leftovers of a merge that was killed hard (the run lock proves nobody owns them)
+    except sandbox.SandboxError as e:
+        log(f"warning: no orphan sweep: {e}")
+        gone = []
+    if gone:
+        log(f"removed {len(gone)} sandbox container(s) left over from an earlier process of this run")
+    res = sandbox.run_tests(repo, cfg, folder, argv, run_id, timeout_s=TEST_TIMEOUT_S, cancel=cancel, log=log)
+    text = f"$ {command}\n[sandbox: docker]\n[exit {res.exit_code}]\n{res.stdout}\n--- stderr ---\n{res.stderr}\n"
+    if res.kind == "cancelled":
+        return TestOutcome("cancelled", None, text, "cancelled")
+    if res.kind == "timed_out":
+        return TestOutcome("timed_out", None, text + "\n[timed out]\n", "timed out")
+    if res.kind in ("infra", "unrunnable"):
+        return TestOutcome("cannot_run", res.exit_code, text + f"\n[sandbox: {res.detail}]\n", res.detail)
+    tail = _tail(res.stdout + res.stderr)
+    return TestOutcome("ran", res.exit_code, text, f"exit {res.exit_code}" + (f"\n{tail}" if tail else ""))
+
+
+def _run_tests(repo: ResolvedRepo, cfg: SandboxConfig, argv: list[str], command: str, folder: Path, run_id: str,
                cancel: threading.Event | None, log: Callable[[str], None]) -> TestOutcome:  # fmt: skip
-    return _run_on_host(repo, argv, command, folder, cancel)
+    if repo.sandbox == "off":
+        log(sandbox.OFF_WARNING)
+        return _run_on_host(repo, argv, command, folder, cancel)
+    return _run_in_sandbox(repo, cfg, argv, command, folder, run_id, cancel, log)
 
 
 def merge_run(
-    repo: ResolvedRepo, run_dir: Path, allow_main: bool = False, *, log: Callable[[str], None] = lambda m: None,
-    cancel: threading.Event | None = None,
+    repo: ResolvedRepo, run_dir: Path, allow_main: bool = False, *, cfg: SandboxConfig | None = None,
+    log: Callable[[str], None] = lambda m: None, cancel: threading.Event | None = None,
 ) -> MergeResult:  # fmt: skip
     meta = load_meta(run_dir)
     ex = meta.get("exec")
@@ -138,8 +164,10 @@ def merge_run(
             raise MergeError(f"a leftover folder of an earlier merge is in the way ({e}); remove it by hand") from e
     tmp = workspace.add_detached(path, repo_name, tmp_name, candidate)
     try:
-        log(f"testing the merge result; {target} is not touched until the tests pass")
-        res = _run_tests(repo, argv, repo.test_command, workspace._guard(tmp, path), run_dir.name, cancel, log)
+        where = "in the sandbox" if repo.sandbox == "docker" else "on this machine"
+        log(f"testing the merge result {where}; {target} is not touched until the tests pass")
+        res = _run_tests(repo, cfg or SandboxConfig(), argv, repo.test_command, workspace._guard(tmp, path), run_dir.name,
+                         cancel, log)  # fmt: skip
         tests_file = run_dir / TESTS_FILE
         tests_file.write_text(res.text, encoding="utf-8")
     finally:
