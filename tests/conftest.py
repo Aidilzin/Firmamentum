@@ -33,7 +33,36 @@ def _uses_git(item) -> bool:
     return ns.get("make_repo") is git_helpers.make_repo or ns.get("git") is git_helpers.git
 
 
+# Tests that kill process trees, race threads or wait on timers. Under `-n` they all run on ONE worker (group "timing"),
+# so a busy machine never squeezes them next to a whole other file; their timeouts stay as they are.
+TIMING_TESTS = {
+    "test_process.py": {"test_timeout_kills_process", "test_timeout_kills_grandchild", "test_interrupt_kills_the_child"},
+    "test_cancel.py": {
+        "test_cancel_kills_the_child_and_reports_cancelled_not_timeout", "test_cancel_kills_the_grandchild_too",
+        "test_stdin_survives_the_poll_loop", "test_timeout_still_wins_when_the_token_is_never_set",
+        "test_cancel_from_another_thread_while_the_agent_blocks", "test_stop_now_from_another_thread_only_cancels",
+    },
+    "test_events.py": {
+        "test_cancel_during_a_blocked_call_from_another_thread", "test_a_slow_consumer_thread_does_not_slow_the_executor",
+        "test_rendering_while_events_arrive_does_not_race",
+    },
+    "test_runlock.py": {
+        "test_lock_held_by_another_process_dies_with_it", "test_beat_rewrites_the_heartbeat_without_losing_the_lock",
+        "test_write_meta_survives_a_reader_that_holds_the_file_open",
+    },
+}  # fmt: skip
+
+
+def _xdist_group(item) -> str:
+    """`--dist loadgroup` keeps one file on one worker (what loadfile does), except the timing tests, which share one group."""
+    module = item.path.name
+    if getattr(item, "originalname", item.name) in TIMING_TESTS.get(module, ()):
+        return "timing"
+    return module
+
+
 def pytest_collection_modifyitems(items):
     for item in items:
         if _uses_git(item):
             item.add_marker(pytest.mark.slow)
+        item.add_marker(pytest.mark.xdist_group(name=_xdist_group(item)))

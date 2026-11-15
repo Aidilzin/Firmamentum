@@ -14,5 +14,6 @@ Personal Python CLI that orchestrates two official coding CLIs as worker agents:
 
 ## Stack
 - Python 3.12, uv, pytest
-- Run tests: `uv run pytest -q`
+- Quick loop while developing: `uv run pytest -q -m "not slow"` (about 12 s; skips tests that make a git repo or run the executor).
+- Full check: `uv run pytest -q -n 4`. Run it before every commit. (`uv run pytest -q` without `-n` is the same suite, serial and much slower.)
 - Small commits.
