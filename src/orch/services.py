@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from . import workspace
+from . import sandbox, workspace
 from .adapters.base import AgentAdapter
 from .config import Config, ResolvedRepo
 from .events import RunEvent
@@ -223,10 +223,24 @@ def build_executor(
     return Executor(target, run_dir, cfg, get_adapter, log=log, on_event=on_event, hidden_tests=hidden_tests, cancel=cancel, db_path=db_path)
 
 
+RUNS_AGENT_CODE = ("start", "resume", "approve", "answer")  # actions that can run the repo's tests; `reject` cannot
+
+
+def check_sandbox(target: ResolvedRepo) -> None:
+    """Refuse (before a worktree, a model call or a test run) when the repo wants Docker and Docker is not there.
+    Asks the engine again every time; there is no fallback to running on this machine (see sandbox.require)."""
+    try:
+        sandbox.require(target)
+    except sandbox.SandboxUnavailable as e:
+        raise ServiceError(str(e), 2) from e
+
+
 def drive(ex: Executor, action: str = "start", **kw) -> ExecOutcome:
     """Run one executor action (start, resume, approve, reject, answer) until the run stops. Blocks."""
     if action not in DRIVE_ACTIONS:
         raise ValueError(f"unknown action {action!r}")
+    if action in RUNS_AGENT_CODE:
+        check_sandbox(ex.repo)  # right before the run starts, so a stopped engine is caught on resume and approve too
     try:
         return getattr(ex, action)(**kw)
     except (ExecError, workspace.WorkspaceError, RunNotFound) as e:
@@ -294,7 +308,8 @@ def _make_plan(request, target, cfg, get_adapter, *, use_scout: bool = False, ca
 
 
 def check_run_request(target: ResolvedRepo, hidden_tests: Path | None = None) -> None:
-    """Refuse `run` before any quota is spent: no test command, or a hidden-tests folder the builder could see."""
+    """Refuse `run` before any quota is spent: no test command, a hidden-tests folder the builder could see, or a
+    sandboxed repo with no Docker."""
     if not target.test_command:
         raise ServiceError("this repo has no test_command in config.yaml; refusing to run.", 2)
     if hidden_tests is not None:
@@ -302,6 +317,7 @@ def check_run_request(target: ResolvedRepo, hidden_tests: Path | None = None) ->
             check_hidden_tests(hidden_tests, target.path)
         except ExecError as e:
             raise ServiceError(str(e), 2) from e
+    check_sandbox(target)
 
 
 def plan_run(
