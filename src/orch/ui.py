@@ -162,7 +162,7 @@ def render_doctor(checks, theme: Theme) -> list[Text]:
         t = Text()
         t.append(theme.sym(key) + " ", style=theme.sym_style(key))
         t.append(f"{c.name:<{width}}  ", style=theme.style("text", bold=True))
-        t.append(c.detail, style=theme.style("text"))
+        t.append(c.detail, style=theme.style("warning" if c.level == "warn" else "text"))
         out.append(t)
         if c.level != "ok" and c.fix:
             out.append(Text(f"    fix: {c.fix}", style=theme.style("dim")))

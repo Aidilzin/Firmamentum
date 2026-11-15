@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Mapping
 
-from . import budget, versions, workspace
+from . import budget, sandbox, versions, workspace
 from .adapters.claude_code import SCRUBBED_ENV
 from .adapters.process import child_env, run_process
 from .config import Config, ConfigError, load_config, default_config_path
@@ -82,6 +82,7 @@ class Context:
     python: tuple[int, int] = field(default_factory=lambda: sys.version_info[:2])
     has_tzdata: Callable[[], bool] = lambda: importlib.util.find_spec("tzdata") is not None
     is_git_repo: Callable[[Path], bool] = lambda p: workspace.git(p, "rev-parse", "--git-dir", check=False).returncode == 0
+    docker: Callable[[str], sandbox.ProbeResult] = lambda image: sandbox.docker_probe(image)  # always asks the engine
 
 
 def _writable(directory: Path) -> str | None:
@@ -243,6 +244,35 @@ def check_repos(ctx: Context, cfg: Config) -> list[Check]:
     return out
 
 
+def check_sandbox(ctx: Context, cfg: Config) -> list[Check]:
+    """Docker engine, the sandbox image(s) the configured repos need, and one warning per repo that opted out."""
+    docker_repos = {n: r for n, r in cfg.repos.items() if r.sandbox == "docker"}
+    off_repos = [n for n, r in cfg.repos.items() if r.sandbox == "off"]
+    images = sorted({r.image or cfg.sandbox.image for r in docker_repos.values()}) or [cfg.sandbox.image]
+    needed = ", ".join(sorted(docker_repos))
+    probes = {img: ctx.docker(img) for img in images}
+    out: list[Check] = []
+    engine = next((p for p in probes.values() if p.engine_ok), None)
+    if engine is None:
+        first = next(iter(probes.values()))
+        level, why = (ERR, f"needed by repo {needed}") if docker_repos else (WARN, "not needed while every repo has sandbox: off")
+        out.append(Check("docker engine", level, f"not running ({first.detail}); {why}",
+                         "start Docker Desktop, then run `orch doctor` again"))  # fmt: skip
+    else:
+        out.append(Check("docker engine", OK, f"running (server {engine.server})"))
+        for img, p in probes.items():
+            if p.image_ok:
+                out.append(Check(f"docker image {img}", OK, p.image_id.removeprefix("sha256:")[:12]))
+            else:
+                users = ", ".join(n for n, r in docker_repos.items() if (r.image or cfg.sandbox.image) == img)
+                out.append(Check(f"docker image {img}", ERR if users else WARN, f"not found; used by repo {users or '(none)'}",
+                                 "build it: orch sandbox build"))  # fmt: skip
+    for n in off_repos:
+        out.append(Check(f"sandbox repo {n}", WARN, sandbox.OFF_WARNING,
+                         f"agent-written tests run with your rights; remove `sandbox: off` from repos.{n} in config.yaml"))  # fmt: skip
+    return out
+
+
 def check_paths(ctx: Context) -> list[Check]:
     out = []
     wt = ctx.wt_root()
@@ -288,6 +318,7 @@ def run_checks(ctx: Context | None = None) -> list[Check]:
         *check_login(ctx),
         cfg_check,
         *(check_repos(ctx, cfg) if cfg else []),
+        *(check_sandbox(ctx, cfg) if cfg else []),
         *check_paths(ctx),
         check_tzdata(ctx),
         *check_cooldowns(ctx),
