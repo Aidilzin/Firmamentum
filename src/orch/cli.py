@@ -24,7 +24,7 @@ from .budget import run_agent, summary, summary_by_model
 from .config import ConfigError
 from . import services, versions
 from .session import Session
-from .theme import current_theme, demon_label, demon_name, set_theme
+from .theme import demon_label, demon_name, resolve_theme
 from .ui import make_view, render_doctor, render_plain, render_rich
 from . import doctor as doctor_mod
 from . import home as home_mod
@@ -56,7 +56,7 @@ def _main(
     session = Session(theme=theme, ascii_=ascii_)  # a config that cannot be loaded is kept as session.config_error
     ctx.obj = session
     try:
-        set_theme(session.theme)
+        session.theme  # an unknown theme name is refused here, before the subcommand runs
     except ValueError as e:
         typer.echo(f"Error: {e}", err=True)
         raise typer.Exit(2)
@@ -369,7 +369,7 @@ def _emit_status(run_dir: Path, repo_name: str | None = None, header: bool = Tru
     """Constellation + demon lines (coloured on a terminal, plain otherwise), then the detailed step table."""
     view = build_run_view(load_meta(run_dir)) if header else None
     if view is not None and (view.steps or view.demons):  # a run that has not started has nothing to draw
-        theme = theme or current_theme()
+        theme = theme or resolve_theme()
         if sys.stdout.isatty():
             Console().print(render_rich(view, theme, with_footer=False))
         else:
@@ -451,7 +451,7 @@ def _planning(fn, *args, **kw) -> services.PlanResult:
 
 def _drive(target, run_dir: Path, cfg, action: str = "start", plain: bool = False, hidden_tests: Path | None = None,
            theme=None, db_path: Path | None = None, **kw) -> None:  # fmt: skip
-    theme = theme or current_theme()
+    theme = theme or resolve_theme()
     view = make_view(plain, typer.echo, {r: es[0].label for r, es in cfg.roles.items()}, theme)
     ex = services.build_executor(target, run_dir, cfg, lambda name: get_adapter(AgentName(name)), log=view.log,
                                  on_event=view.on_event if view.live else None, hidden_tests=hidden_tests, db_path=db_path)  # fmt: skip

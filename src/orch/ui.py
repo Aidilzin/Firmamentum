@@ -19,7 +19,7 @@ from rich.text import Text
 
 from .events import Meta, RunEvent, freeze
 from .runs import run_tokens
-from .theme import Theme, current_theme, demon_label
+from .theme import Theme, demon_label, resolve_theme
 from .view import (  # noqa: F401  (PHASE_ROLE / fmt_elapsed re-exported for older imports)
     DONE, FAILED, NEEDS, PENDING, PHASE_LABEL, PHASE_ROLE, RUNNING, RunView, StopInfo, build_run_view, fmt_elapsed,
     fmt_tokens, stop_info,
@@ -124,7 +124,7 @@ def render_rich(view: RunView, theme: Theme, with_footer: bool = True) -> Group:
 
 def render_plain(view: RunView, theme: Theme | None = None) -> list[str]:
     """The same words as the rich renderer, as plain lines (no colour, safe for logs)."""
-    theme = theme or current_theme()
+    theme = theme or resolve_theme()
     lines = [constellation(view, theme).plain] if view.steps else []
     lines += [t.plain.rstrip() for t in demon_lines(view, theme)]
     return lines
@@ -179,7 +179,7 @@ class PlainView:
 
     def __init__(self, echo: Callable[[str], None], theme: Theme | None = None):
         self.echo = echo
-        self.theme = theme or current_theme()
+        self.theme = theme or resolve_theme()
         self._seen: set[str] = set()
 
     def log(self, msg: str) -> None:
@@ -216,7 +216,7 @@ class LiveView(PlainView):
 
     def __init__(self, first_entries: dict[str, str], console: Console | None = None,
                  clock: Callable[[], float] = time.monotonic, theme: Theme | None = None):  # fmt: skip
-        self.theme = theme or current_theme()  # not super().__init__: `echo` here is a method, not an attribute
+        self.theme = theme or resolve_theme()  # not super().__init__: `echo` here is a method, not an attribute
         self._seen: set[str] = set()
         self.console = console or Console()
         self.first_entries = first_entries

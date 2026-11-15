@@ -150,16 +150,3 @@ def resolve_theme(
         raise ValueError(f"unknown theme {name!r}; valid: {', '.join(THEME_NAMES)}")
     color = not env.get("NO_COLOR")  # https://no-color.org: any non-empty value
     return Theme(name, color=color, ascii_=cli_ascii or not can_encode(stream))
-
-
-_current: Theme | None = None
-
-
-def set_theme(theme: Theme | None) -> None:
-    global _current
-    _current = theme
-
-
-def current_theme() -> Theme:
-    """The theme chosen by the CLI callback, or a default resolved from env when none was set (tests, library use)."""
-    return _current if _current is not None else resolve_theme()
