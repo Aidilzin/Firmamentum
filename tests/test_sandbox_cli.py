@@ -182,3 +182,9 @@ def test_cli_check_for_an_off_repo_warns_and_does_not_ask_docker(tmp_path, monke
     monkeypatch.setattr(sandbox, "docker_probe", eng)
     r = invoke("sandbox", "check", "--repo", "demo")
     assert r.exit_code == 0 and "WARNING: " + sandbox.OFF_WARNING in r.output and eng.calls == 0
+
+
+def test_the_entry_script_reserves_exit_96_and_97():
+    body = (sandbox.dockerfile_dir() / "entry.sh").read_text(encoding="utf-8")
+    assert f"exit {sandbox.EXIT_VENV_NOT_READY}" in body and f"exit {sandbox.EXIT_COPY_FAILED}" in body
+    assert "/venv/.orch-ready" in body and "[ ! -w /venv ]" in body

@@ -17,7 +17,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal
+from typing import Callable, ContextManager, Literal
 
 from .adapters.process import ProcessOutput, child_env, run_process
 from .config import ResolvedRepo, SandboxConfig
@@ -346,3 +346,119 @@ def require(target: ResolvedRepo) -> Status:
     if st.state == "unavailable":
         raise SandboxUnavailable(unavailable_message(st, target.name or str(target.path), target.image))
     return st
+
+
+# ---------- one test run ----------
+# Exit codes the image's entry script reserves (sandbox/entry.sh). A test that happens to exit with one of them only
+# stops the run for you to look at; it can never turn a failure into a pass.
+EXIT_VENV_NOT_READY = 96
+EXIT_COPY_FAILED = 97
+EXIT_KILLED = 137
+EXIT_CANNOT_EXEC = (126, 127)
+INSPECT_FORMAT = "{{.State.Status}}|{{.State.ExitCode}}|{{.State.OOMKilled}}|{{.State.Error}}"
+
+
+@dataclass(frozen=True)
+class TestRun:
+    """What one sandboxed test run came to. `ran` means the tests ran and `exit_code` is theirs (0 = pass).
+    `infra` means the container could not run them (`detail` says why): that is never a test failure."""
+
+    kind: Literal["ran", "infra", "unrunnable", "timed_out", "cancelled"]
+    exit_code: int | None = None
+    stdout: str = ""
+    stderr: str = ""
+    detail: str = ""
+
+    @property
+    def passed(self) -> bool:
+        return self.kind == "ran" and self.exit_code == 0
+
+
+TestRun.__test__ = False  # not a pytest class, whatever module imports it
+
+WarmSource = Callable[[], ContextManager[Path]]
+
+
+def _infra(detail: str, out: ProcessOutput | None = None) -> TestRun:
+    return TestRun("infra", out.returncode if out else None, out.stdout if out else "", out.stderr if out else "", detail)
+
+
+def classify(out: ProcessOutput, name: str, memory: str) -> TestRun:
+    """Decide what a finished `docker run` means. A non-zero CLI exit code alone proves nothing (125 can be a daemon
+    error or a test calling sys.exit(125); an engine that stops mid-run gives 1), so the engine is asked about the
+    container itself. Cancel and timeout are handled by the caller."""
+    rc = out.returncode
+    if out.not_found:
+        return _infra("the docker command was not found on PATH", out)
+    if rc is None:
+        return _infra(out.error or "docker could not be started", out)
+    if rc == 0:
+        return TestRun("ran", 0, out.stdout, out.stderr)
+    ins = docker_call(["docker", "inspect", "--format", INSPECT_FORMAT, name])
+    if not _ok(ins):
+        why = _first_line(out.stderr) or _why(ins)  # e.g. "Unable to find image", "error during connect"
+        return _infra(f"the container never ran or the engine stopped mid-run ({why})", out)
+    parts = ins.stdout.strip().split("|", 3)
+    if len(parts) != 4:
+        return _infra(f"unreadable answer from docker inspect: {ins.stdout.strip()[:100]!r}", out)
+    status, code_s, oom, err = parts
+    if err.strip():
+        return _infra(f"container could not start: {_first_line(err)}", out)
+    if status == "created":
+        return _infra("container could not start (it was created but never ran)", out)
+    if oom.strip() == "true":
+        return _infra(f"out of memory (limit {memory}); raise `sandbox.memory` in config.yaml", out)
+    if status != "exited" or code_s.strip() != str(rc):
+        return _infra(f"lost contact with the engine (container {status}, exit {code_s.strip()}, docker said {rc})", out)
+    if rc == EXIT_KILLED:
+        return _infra("container was killed from outside (exit 137, not out of memory)", out)
+    if rc == EXIT_COPY_FAILED:
+        return _infra("copying the source into the container failed (is /work full?)", out)
+    if rc in EXIT_CANNOT_EXEC:
+        return TestRun("unrunnable", rc, out.stdout, out.stderr, "test command not found in the sandbox image")
+    return TestRun("ran", rc, out.stdout, out.stderr)
+
+
+def _run_once(spec: Spec, src: Path, command: list[str], run_id: str, volume: str, env: dict[str, str],
+              passthrough: tuple[str, ...] | list[str], timeout_s: int, cancel: threading.Event | None) -> TestRun:  # fmt: skip
+    name = container_name(run_id)
+    argv = test_argv(spec, src, command, run_id, volume, passthrough, name=name)
+    out = docker_run(argv, inner=command, src=src, env=env, timeout_s=timeout_s, cancel=cancel)
+    if out.cancelled:
+        return TestRun("cancelled")
+    if out.timed_out:
+        return TestRun("timed_out", None, out.stdout, out.stderr)
+    return classify(out, name, spec.memory)
+
+
+def run_tests(
+    target: ResolvedRepo, cfg: SandboxConfig, src: Path, command: list[str], run_id: str, *,
+    warm_src: WarmSource | None = None, timeout_s: int = 600, cancel: threading.Event | None = None,
+    log: Callable[[str], None] = lambda m: None,
+) -> TestRun:  # fmt: skip
+    """The one way tests run in the sandbox (the executor and `orch sandbox test` both come through here).
+    `src` is mounted read-only; `command` comes from config.yaml. Never raises for a sandbox problem: that is a
+    `TestRun(kind="infra")`. Containers of `run_id` are removed on every way out, Ctrl-C included."""
+    if target.sandbox == "off":
+        raise SandboxError("run_tests called for a repo with sandbox: off")
+    try:
+        _check(run_id, _RUN_ID, "run id")  # before anything: `sweep` in the finally below needs a good label too
+    except SandboxError as e:
+        return _infra(str(e))
+    try:
+        st = require(target)  # asks the engine again; there is no fallback to the host
+    except SandboxUnavailable as e:
+        return _infra(str(e))
+    spec = Spec.for_repo(target, cfg)
+    env = child_env(passthrough=target.env_passthrough)
+    try:
+        volume = venv_volume_name(src, st.image_id)
+        res = _run_once(spec, src, command, run_id, volume, env, target.env_passthrough, timeout_s, cancel)
+        if res.kind == "ran" and res.exit_code == EXIT_VENV_NOT_READY:
+            res = TestRun("infra", res.exit_code, res.stdout, res.stderr,
+                          "the test environment (venv volume) is not prepared and there is no source to prepare it from")  # fmt: skip
+        return res
+    except SandboxError as e:
+        return _infra(str(e))
+    finally:
+        sweep(run_id, log)  # a cancelled docker CLI leaves its container running; this stops and removes it
