@@ -13,9 +13,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from . import sandbox, workspace
+from . import sandbox, warm, workspace
 from .adapters.process import child_env, run_process
-from .config import ResolvedRepo, SandboxConfig
+from .config import Config, PostChecksConfig, ResolvedRepo, SandboxConfig
 from .runs import load_meta, write_meta
 
 PROTECTED_BRANCHES = ("main", "master")
@@ -78,7 +78,8 @@ def _run_on_host(repo: ResolvedRepo, argv: list[str], command: str, folder: Path
 
 
 def _run_in_sandbox(repo: ResolvedRepo, cfg: SandboxConfig, argv: list[str], command: str, folder: Path, run_id: str,
-                    cancel: threading.Event | None, log: Callable[[str], None]) -> TestOutcome:  # fmt: skip
+                    warm_src: sandbox.WarmSource | None, cancel: threading.Event | None,
+                    log: Callable[[str], None]) -> TestOutcome:  # fmt: skip
     """The candidate worktree is mounted read-only in a container with no network, the same path a run's own tests take.
     A problem with the sandbox itself is `cannot_run` (never a test failure), so nothing is merged either way."""
     try:
@@ -88,7 +89,7 @@ def _run_in_sandbox(repo: ResolvedRepo, cfg: SandboxConfig, argv: list[str], com
         gone = []
     if gone:
         log(f"removed {len(gone)} sandbox container(s) left over from an earlier process of this run")
-    res = sandbox.run_tests(repo, cfg, folder, argv, run_id, timeout_s=TEST_TIMEOUT_S, cancel=cancel, log=log)
+    res = sandbox.run_tests(repo, cfg, folder, argv, run_id, warm_src=warm_src, timeout_s=TEST_TIMEOUT_S, cancel=cancel, log=log)
     text = f"$ {command}\n[sandbox: docker]\n[exit {res.exit_code}]\n{res.stdout}\n--- stderr ---\n{res.stderr}\n"
     if res.kind == "cancelled":
         return TestOutcome("cancelled", None, text, "cancelled")
@@ -101,15 +102,16 @@ def _run_in_sandbox(repo: ResolvedRepo, cfg: SandboxConfig, argv: list[str], com
 
 
 def _run_tests(repo: ResolvedRepo, cfg: SandboxConfig, argv: list[str], command: str, folder: Path, run_id: str,
-               cancel: threading.Event | None, log: Callable[[str], None]) -> TestOutcome:  # fmt: skip
+               warm_src: sandbox.WarmSource | None, cancel: threading.Event | None,
+               log: Callable[[str], None]) -> TestOutcome:  # fmt: skip
     if repo.sandbox == "off":
         log(sandbox.OFF_WARNING)
         return _run_on_host(repo, argv, command, folder, cancel)
-    return _run_in_sandbox(repo, cfg, argv, command, folder, run_id, cancel, log)
+    return _run_in_sandbox(repo, cfg, argv, command, folder, run_id, warm_src, cancel, log)
 
 
 def merge_run(
-    repo: ResolvedRepo, run_dir: Path, allow_main: bool = False, *, cfg: SandboxConfig | None = None,
+    repo: ResolvedRepo, run_dir: Path, allow_main: bool = False, *, cfg: Config | None = None,
     log: Callable[[str], None] = lambda m: None, cancel: threading.Event | None = None,
 ) -> MergeResult:  # fmt: skip
     meta = load_meta(run_dir)
@@ -166,7 +168,14 @@ def merge_run(
     try:
         where = "in the sandbox" if repo.sandbox == "docker" else "on this machine"
         log(f"testing the merge result {where}; {target} is not touched until the tests pass")
-        res = _run_tests(repo, cfg or SandboxConfig(), argv, repo.test_command, workspace._guard(tmp, path), run_dir.name,
+        folder = workspace._guard(tmp, path)
+        patterns = (cfg.post_checks if cfg else PostChecksConfig()).dependency
+        approved = warm.approved_dependency_files(meta)
+
+        def warm_src():  # the one container with network: your commit plus the dependency files you approved, never the candidate
+            return warm.merge_warm_tree(path, folder, target_sha, branch_sha, candidate, f"merge-{run_dir.name}", patterns, approved)
+
+        res = _run_tests(repo, cfg.sandbox if cfg else SandboxConfig(), argv, repo.test_command, folder, run_dir.name, warm_src,
                          cancel, log)  # fmt: skip
         tests_file = run_dir / TESTS_FILE
         tests_file.write_text(res.text, encoding="utf-8")

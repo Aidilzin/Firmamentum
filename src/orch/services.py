@@ -181,7 +181,7 @@ def merge(
 ) -> MergeResult:  # fmt: skip
     """Build the merge result, test it, and move the current branch only if the tests pass. Never pushes."""
     try:
-        return merge_run(target, run_dir, allow_main=allow_main, cfg=cfg.sandbox if cfg else None, log=log, cancel=cancel)
+        return merge_run(target, run_dir, allow_main=allow_main, cfg=cfg, log=log, cancel=cancel)
     except (MergeError, workspace.WorkspaceError, RunNotFound) as e:
         raise ServiceError(str(e)) from e
 

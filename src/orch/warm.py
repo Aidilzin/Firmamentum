@@ -40,6 +40,26 @@ def approved_dependency_files(meta: dict) -> set[str]:
     return out
 
 
+def _blob(repo: Path, rev: str, name: str) -> str:
+    p = workspace.git(repo, "rev-parse", "--verify", "--quiet", f"{rev}:{name}", check=False)
+    return p.stdout.strip() if p.returncode == 0 else ""
+
+
+@contextmanager
+def merge_warm_tree(
+    repo: Path, wt: Path, target_sha: str, branch_sha: str, candidate_sha: str, run_id: str, patterns: list[str],
+    approved: set[str], root: Path | None = None,
+) -> Iterator[Path]:  # fmt: skip
+    """`warm_tree` for `orch merge`: the trusted base is the target branch (your commit) and `wt` is the merge candidate.
+    A dependency file whose merged text is neither the target's nor the branch's (git combined both sides into a third
+    text nobody approved) is refused before anything is exported."""
+    for name in changed_dependency_files(wt, target_sha, patterns):
+        if _blob(repo, candidate_sha, name) != _blob(repo, branch_sha, name):
+            raise SandboxError(f"dependency file {name} changed on both sides of the merge; merge by hand. Nothing was run.")
+    with warm_tree(repo, wt, target_sha, run_id, patterns, approved, root) as folder:
+        yield folder
+
+
 @contextmanager
 def warm_tree(
     repo: Path, wt: Path, base_sha: str, run_id: str, patterns: list[str], approved: set[str], root: Path | None = None
