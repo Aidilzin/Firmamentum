@@ -4,10 +4,12 @@ warning: plan test_command 'uv run pytest -q' differs from config 'python -c "im
 [s1] Do s1: Maxwell (builder) building
 
 [x]  step 1 of 1 · failed · Do s1
+sandbox: docker
 # Maxwell   built 1 step                sonnet · 0
 
 Run: <RUN>  status: failed  time: <T>
 Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+Sandbox: docker
 step  status                tokens  tests       rounds  review   commit    time    title
 s1    failed                     0  -           0       -        -         <T>    Do s1
       tokens by role: Maxwell=0

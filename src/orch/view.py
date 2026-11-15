@@ -90,6 +90,7 @@ class RunView:
     step_count: int
     demons: list[DemonLine]
     stop: StopInfo | None = None
+    sandbox: str | None = None  # "docker" or "off" as of the last start/resume; None for a run that never started
 
 
 def parse_utc(text: str | None) -> datetime | None:
@@ -251,7 +252,7 @@ def build_run_view(
         run_id=meta.get("run_id", ""), status=status, models=models, steps=steps, current=current,
         tokens_total=total, tokens_by_role=by_role, elapsed_total=elapsed_total,
         step_index=focus + 1 if steps else 0, step_count=len(steps),
-        demons=_demon_lines(meta, steps, models, by_role, raw_steps),
+        demons=_demon_lines(meta, steps, models, by_role, raw_steps), sandbox=meta.get("sandbox"),
     )  # fmt: skip
     if stop is None and status in ("failed", "needs_input", "awaiting_approval", "paused", "cancelled", "rejected"):
         bad = next((s.id for s in steps if s.status in STOPPED_STEP_STATES or s.error in ("rate limited", "cancelled")), None)

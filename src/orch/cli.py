@@ -28,6 +28,7 @@ from .theme import demon_label, demon_name, resolve_theme
 from .ui import make_view, render_doctor, render_plain, render_rich
 from . import doctor as doctor_mod
 from . import home as home_mod
+from .sandbox import OFF_WARNING
 from .view import build_run_view, duration, fmt_elapsed
 from .plan import format_plan
 from .services import EXIT_CODES, next_actions
@@ -312,6 +313,10 @@ def _status_table(run_dir: Path, repo_name: str | None = None) -> str:
     ex = meta.get("exec")
     if ex:
         lines.append(f"Branch: {ex['branch']}  Worktree: {ex['worktree']}")
+    if meta.get("sandbox") == "off":
+        lines.append("WARNING: " + OFF_WARNING)
+    elif meta.get("sandbox"):
+        lines.append(f"Sandbox: {meta['sandbox']}")
     if meta.get("resume_after") and meta.get("status") == "paused":
         after = _parse_utc(meta["resume_after"])
         if after:

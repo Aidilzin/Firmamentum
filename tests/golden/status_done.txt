@@ -1,10 +1,12 @@
 exit: 0
 --- output ---
 *---*  step 2 of 2 · done · Do s2
+sandbox: docker
 # Maxwell   built 2 steps               sonnet · 200
 
 Run: <RUN>  status: done  time: <T>
 Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+Sandbox: docker
 step  status                tokens  tests       rounds  review   commit    time    title
 s1    done                     100  pass        0       -        <SHA>  <T>    Do s1
       tokens by role: Maxwell=100

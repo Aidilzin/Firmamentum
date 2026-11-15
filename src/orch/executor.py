@@ -41,6 +41,7 @@ from .events import (
 from .plan import Plan, Step
 from .planner import extract_json
 from .router import call_role
+from .sandbox import OFF_WARNING
 from .runs import load_meta, load_plan, write_meta
 
 ROLES_DIR = Path(__file__).parent / "roles"
@@ -483,6 +484,9 @@ class Executor:
     def _mark_run_start(self) -> None:
         self.meta.setdefault("started_at", _utc_now())
         self.meta.pop("ended_at", None)
+        self.meta["sandbox"] = self.repo.sandbox  # shown in every header; refreshed on resume, approve and answer
+        if self.repo.sandbox == "off":
+            self.log("warning: " + OFF_WARNING)
 
     def _mark_run_end(self) -> None:
         self.meta["ended_at"] = _utc_now()

@@ -19,6 +19,7 @@ from rich.text import Text
 
 from .events import Meta, RunEvent, freeze
 from .runs import run_tokens
+from .sandbox import OFF_WARNING
 from .theme import Theme, demon_label, resolve_theme
 from .view import (  # noqa: F401  (PHASE_ROLE / fmt_elapsed re-exported for older imports)
     DONE, FAILED, NEEDS, PENDING, PHASE_LABEL, PHASE_ROLE, RUNNING, RunView, StopInfo, build_run_view, fmt_elapsed,
@@ -90,6 +91,18 @@ def constellation(view: RunView, theme: Theme) -> Text:
     return t
 
 
+def sandbox_line(view: RunView, theme: Theme) -> Text | None:
+    """`sandbox: docker` (dim), or `sandbox: off (...)` in the warning colour with the warning glyph; nothing before a start."""
+    if view.sandbox == "off":
+        t = Text()
+        t.append(theme.sym("warn") + " ", style=theme.sym_style("warn"))
+        t.append(OFF_WARNING, style=theme.style("warning", bold=True))
+        return t
+    if view.sandbox:
+        return Text(f"sandbox: {view.sandbox}", style=theme.style("dim"))
+    return None
+
+
 def demon_lines(view: RunView, theme: Theme) -> list[Text]:
     """`glyph Name  what it did / is doing      model · tokens|time` per demon that has run or is running."""
     out = []
@@ -114,6 +127,9 @@ def footer(view: RunView, theme: Theme) -> Text:
 
 def render_rich(view: RunView, theme: Theme, with_footer: bool = True) -> Group:
     parts: list = [constellation(view, theme)] if view.steps else []
+    banner = sandbox_line(view, theme)
+    if banner is not None:
+        parts.append(banner)
     lines = demon_lines(view, theme)
     if lines:
         parts += ["", *lines] if parts else lines
@@ -126,6 +142,9 @@ def render_plain(view: RunView, theme: Theme | None = None) -> list[str]:
     """The same words as the rich renderer, as plain lines (no colour, safe for logs)."""
     theme = theme or resolve_theme()
     lines = [constellation(view, theme).plain] if view.steps else []
+    banner = sandbox_line(view, theme)
+    if banner is not None:
+        lines.append(banner.plain)
     lines += [t.plain.rstrip() for t in demon_lines(view, theme)]
     return lines
 

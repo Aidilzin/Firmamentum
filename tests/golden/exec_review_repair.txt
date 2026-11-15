@@ -10,12 +10,14 @@ warning: plan test_command 'uv run pytest -q' differs from config 'python -c "im
 [s1] done <SHA>
 
 *  step 1 of 1 · done · Do s1
+sandbox: docker
 # Maxwell   built 1 step                sonnet · 100
 < Loschmidt reviewed 1 step             opus · 100
 + Descartes repaired 1 step             sonnet · 100
 
 Run: <RUN>  status: done  time: <T>
 Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+Sandbox: docker
 step  status                tokens  tests       rounds  review   commit    time    title
 s1    done                     300  pass        1       approve  <SHA>  <T>    Do s1
       tokens by role: Maxwell=100, Loschmidt=100, Descartes=100

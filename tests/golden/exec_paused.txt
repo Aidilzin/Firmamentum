@@ -4,9 +4,11 @@ warning: plan test_command 'uv run pytest -q' differs from config 'python -c "im
 [s1] Do s1: Maxwell (builder) building
 
 .  step 1 of 1 · paused · Do s1
+sandbox: docker
 
 Run: <RUN>  status: paused  time: <T>
 Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+Sandbox: docker
 Paused until <WHEN>
 step  status                tokens  tests       rounds  review   commit    time    title
 s1    pending                    0  -           0       -        -         <T>    Do s1

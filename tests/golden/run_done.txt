@@ -17,12 +17,14 @@ warning: plan test_command 'uv run pytest -q' differs from config 'python -c "im
 [s1] done <SHA>
 
 *  step 1 of 1 · done · Do s1
+sandbox: docker
 * Laplace   planned 1 step              opus · 70
 # Maxwell   built 1 step                sonnet · 100
 
 Run: <RUN>  status: done  time: <T>
 Planning models: Laplace=claude:opus
 Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+Sandbox: docker
 step  status                tokens  tests       rounds  review   commit    time    title
 s1    done                     100  pass        0       -        <SHA>  <T>    Do s1
       tokens by role: Maxwell=100

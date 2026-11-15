@@ -4,10 +4,12 @@ warning: plan test_command 'uv run pytest -q' differs from config 'python -c "im
 [s1] Do s1: Maxwell (builder) building
 
 [!]  step 1 of 1 · needs your approval · Do s1
+sandbox: docker
 # Maxwell   built 1 step                sonnet · 100
 
 Run: <RUN>  status: awaiting_approval  time: <T>
 Branch: orch/<RUN>  Worktree: <TMP>/orch-wt/demo/<RUN>
+Sandbox: docker
 step  status                tokens  tests       rounds  review   commit    time    title
 s1    awaiting_approval        100  -           0       -        -         <T>    Do s1
       tokens by role: Maxwell=100
