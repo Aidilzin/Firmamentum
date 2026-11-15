@@ -352,7 +352,9 @@ class Executor:
         hidden_tests: Path | None = None,
         cancel: threading.Event | None = None,
         on_event: Callable[[RunEvent], None] | None = None,
+        db_path: Path | None = None,
     ):
+        self.db_path = db_path  # the usage DB for this run's calls; None = the default
         self.repo, self.run_dir, self.cfg, self.get_adapter, self.log = repo, run_dir, cfg, get_adapter, log
         # Deprecated: hands out the live, mutable meta dict (audit D3). Use `on_event`; removed after the shell lands.
         self.on_update = on_update
@@ -687,7 +689,7 @@ class Executor:
         if self._cancel.is_set():  # nothing is called, nothing is logged
             self.last_entry, self.last_called = None, False
             return failure(self.cfg.roles[role_name][0].agent, ErrorKind.CANCELLED, "cancelled before the call")
-        routed = call_role(role_name, with_env, self.get_adapter, self.cfg, cancel=self._cancel)
+        routed = call_role(role_name, with_env, self.get_adapter, self.cfg, cancel=self._cancel, db_path=self.db_path)
         self._resume_after = routed.resume_after if routed.paused else None
         if routed.paused and routed.rate_limited is None:  # nothing was called: all entries already cooling
             self.last_entry = None

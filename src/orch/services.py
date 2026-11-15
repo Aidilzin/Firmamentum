@@ -216,10 +216,11 @@ def build_executor(
     on_event: Callable[[RunEvent], None] | None = None,
     hidden_tests: Path | None = None,
     cancel: threading.Event | None = None,
+    db_path: Path | None = None,
 ) -> Executor:
     """The executor for one run. The caller owns the view (`log`, `on_event`) and the stop handling
     (`ex.cancel()`, `ex.stop_now()`), then hands the executor to `drive`."""
-    return Executor(target, run_dir, cfg, get_adapter, log=log, on_event=on_event, hidden_tests=hidden_tests, cancel=cancel)
+    return Executor(target, run_dir, cfg, get_adapter, log=log, on_event=on_event, hidden_tests=hidden_tests, cancel=cancel, db_path=db_path)
 
 
 def drive(ex: Executor, action: str = "start", **kw) -> ExecOutcome:
@@ -282,10 +283,10 @@ def _plan_next(outcome: PlannerOutcome, meta: dict, run_dir: Path, repo_name: st
     return [NextAction("exec", run_dir.name, repo=repo_name or None)]
 
 
-def _make_plan(request, target, cfg, get_adapter, *, use_scout: bool = False, cancel=None) -> PlannerOutcome:
+def _make_plan(request, target, cfg, get_adapter, *, use_scout: bool = False, cancel=None, db_path=None) -> PlannerOutcome:
     """make_plan, with a raw interrupt (second Ctrl-C) turned into the cancelled outcome so the run is always stored."""
     try:
-        return make_plan(request, target, cfg, get_adapter, use_scout=use_scout, cancel=cancel)
+        return make_plan(request, target, cfg, get_adapter, use_scout=use_scout, cancel=cancel, db_path=db_path)
     except KeyboardInterrupt:
         if cancel is not None:
             cancel.set()
@@ -311,12 +312,13 @@ def plan_run(
     *,
     scout: bool = False,
     cancel: threading.Event | None = None,
+    db_path: Path | None = None,
 ) -> PlanResult:
     """Create a run, ask the planner (after an optional scout) and store what came back.
 
     A cancelled planning is stored as `failed` (there is no plan to resume); the next action is to plan again."""
     run_dir = create_run(target.path, request)
-    outcome = _make_plan(request, target, cfg, get_adapter, use_scout=scout, cancel=cancel)
+    outcome = _make_plan(request, target, cfg, get_adapter, use_scout=scout, cancel=cancel, db_path=db_path)
     models = planned_models(outcome, cfg, (["scout"] if scout else []) + ["planner"])
     meta = save_outcome(run_dir, outcome, models)
     if outcome.cancelled:
@@ -334,6 +336,7 @@ def answer_plan(
     get_adapter: Callable[[str], AgentAdapter],
     *,
     cancel: threading.Event | None = None,
+    db_path: Path | None = None,
 ) -> PlanResult:
     """Answer the planner's question and plan again.
 
@@ -351,7 +354,7 @@ def answer_plan(
         while (run_dir / f"planner_raw.{n}.json").exists():
             n += 1
         raw.rename(run_dir / f"planner_raw.{n}.json")
-    outcome = _make_plan(clarified, target, cfg, get_adapter, cancel=cancel)
+    outcome = _make_plan(clarified, target, cfg, get_adapter, cancel=cancel, db_path=db_path)
     models = meta.get("models") or planned_models(outcome, cfg, ["planner"])
     new_meta = save_outcome(run_dir, outcome, models, status_without_plan="needs_input")
     new_meta["total_tokens"] += int(meta.get("total_tokens", 0))

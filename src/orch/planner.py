@@ -139,7 +139,12 @@ def _with_env(build: Callable[[Entry], AgentRequest], repo: ResolvedRepo) -> Cal
 
 
 def run_scout(
-    request: str, repo: ResolvedRepo, cfg: Config, get_adapter: AdapterFactory, cancel: threading.Event | None = None
+    request: str,
+    repo: ResolvedRepo,
+    cfg: Config,
+    get_adapter: AdapterFactory,
+    cancel: threading.Event | None = None,
+    db_path: Path | None = None,
 ) -> Routed:
     prompt = SCOUT_PROMPT + f"\n\nThe planner will work on this request (for focus only): {request}"
 
@@ -147,7 +152,7 @@ def run_scout(
         args, _ = _agent_args(entry, None)
         return AgentRequest(prompt=prompt, cwd=repo.path, model=entry.model, timeout_s=SCOUT_TIMEOUT_S, extra_args=args)
 
-    return call_role("scout", _with_env(build, repo), get_adapter, cfg, cancel=cancel)
+    return call_role("scout", _with_env(build, repo), get_adapter, cfg, cancel=cancel, db_path=db_path)
 
 
 def _feedback(errors: list[str]) -> str:
@@ -192,12 +197,13 @@ def make_plan(
     *,
     use_scout: bool = False,
     cancel: threading.Event | None = None,
+    db_path: Path | None = None,
 ) -> PlannerOutcome:
     """`cancel` (set by Ctrl-C or the shell) kills the running call; the outcome then has `cancelled=True`."""
     outcome = PlannerOutcome(plan=None, attempts=[])
     scout_text: str | None = None
     if use_scout:
-        routed = run_scout(request, repo, cfg, get_adapter, cancel)
+        routed = run_scout(request, repo, cfg, get_adapter, cancel, db_path)
         _note(outcome, "scout", routed)
         if routed.paused:
             if routed.rate_limited is not None:
@@ -227,7 +233,7 @@ def make_plan(
             return AgentRequest(prompt=p, cwd=repo.path, model=entry.model, timeout_s=PLANNER_TIMEOUT_S,
                                 json_schema=schema, resume_id=resume_id, extra_args=args)  # fmt: skip
 
-        routed = call_role("planner", _with_env(build, repo), get_adapter, cfg, cancel=cancel)
+        routed = call_role("planner", _with_env(build, repo), get_adapter, cfg, cancel=cancel, db_path=db_path)
         _note(outcome, "planner", routed)
         return routed
 
