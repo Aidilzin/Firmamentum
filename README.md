@@ -123,6 +123,8 @@ Every command that takes a run id also accepts a unique prefix of it and `--repo
 | `cooldowns` | Lists active rate-limit cooldowns, or clears them with `--clear [claude\|agy]` | `orch cooldowns --clear claude` |
 | `doctor` | Checks the setup: tools, logins, leftover env vars, config, repos, paths (`--live` makes one tiny call per CLI) | `orch doctor` |
 | `version` | Prints the orch, claude and agy versions (costs no quota) | `orch version` |
+| `sandbox build` | Builds the Docker sandbox image from `sandbox/` (needs Docker running and network) | `orch sandbox build` |
+| `sandbox check` | Shows whether a repo's tests would use the sandbox and the exact `docker run` command. Runs nothing | `orch sandbox check --repo orch` |
 | `plan` | Asks Laplace for a plan and stores it (`--scout` adds Brillouin) | `orch plan "add a --json flag to usage" --repo orch` |
 | `runs` | Lists stored runs, newest first | `orch runs --repo orch` |
 | `show` | Prints a stored plan | `orch show 20261110T --repo orch` |
@@ -205,12 +207,14 @@ allow_agy_reviewer: false               # agy only reviews when true (its read-o
 post_checks:                            # optional: file patterns that stop a step for approval (defaults shown in "Safety model")
   protected_words: [secret, credential, token, password, auth, payment]
 ui: { theme: dark }                     # dark | light (optional)
+sandbox: { image: "orch-sbx:py312", memory: 4g, cpus: 4 }   # optional; these are the defaults (see "Security model and limits")
 repos:                                  # the ONLY source of test commands
-  orch:     { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
-  practice: { path: "../orch-practice", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
+  orch:     { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf", sandbox: "off" }
+  practice: { path: "../orch-practice", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf", sandbox: "off" }
 ```
 
 - `env_passthrough: [NAME, ...]` on a repo adds environment variable names that workers and test runs may see. Everything else in your environment is withheld (see "Security model and limits").
+- `sandbox: docker` (the default) or `sandbox: "off"` on a repo. A repo without the key is `docker`, and so is a path that is not in `config.yaml`. `off` is the only way to run without Docker; `orch doctor` and every run header show it in the warning colour. `image: NAME` on a repo uses a different sandbox image. The two `off` lines above are placeholders until sandbox Phase 2 (see below).
 - `test_command` gates every commit. `retest_command` is optional and is a quick re-run tried first in repair rounds.
 - Relative repo paths resolve against the folder that holds `config.yaml`.
 - If the first entry of a role hits a limit, the next entry is tried once. The entry used is shown in the live view and in `orch status`.
@@ -223,7 +227,16 @@ repos:                                  # the ONLY source of test commands
 - **So only run orch on your own repos, with tasks you wrote.** Do not paste issue text, README content or web pages you do not trust into a request: a prompt injection there can make the builder write a test that does anything you can do.
 - What the flags do limit: Claude workers run with `--restricted --strict-mcp-config` (file tools confined to the worktree, your settings, hooks and MCP servers ignored), Bash is allowed only for the exact test commands from `config.yaml`, and workers and test runs see an allow-listed environment instead of your whole one (no API keys, tokens or cloud credentials unless you list them in `env_passthrough`). What they do not limit: the test process itself.
 - Review the diff before `orch merge`, especially test files, `conftest.py`, CI files and anything that stops for approval.
-- A real sandbox (a container, WSL or a separate low-privilege Windows user) is the only complete answer and is not built yet. The audit and probe notes are in `docs/audit-fable.md` and `docs/probe-results.md`.
+- A real sandbox is the only complete answer. It is being built in phases (below). The audit and probe notes are in `docs/audit-fable.md` and `docs/probe-results.md`.
+
+**Docker sandbox: Phase 1 is in, tests do not run in a container yet.** The plan is in `docs/sandbox-design.md` and the hand checks in `docs/sandbox-phase0.md`. Agent-written tests will run in a container with no network, a read-only copy of the source, no git metadata and none of your environment. What exists today:
+
+- The `sandbox` settings in `config.yaml`, with `docker` as the default and an explicit `sandbox: "off"` per repo as the only opt-out.
+- **Fail closed.** For a `docker` repo, `run`, `exec`, `resume`, `approve` and `answer` stop with `Error: Docker is not running ...` (exit 2) when the engine or the image is missing. They ask Docker again every time, so a cached answer never lets a run through. There is no fallback to running unsandboxed.
+- `orch doctor` checks the engine, the image and warns for every repo that is `off`. Run headers, `orch status` and the run log show `sandbox: off` in the warning colour.
+- `orch sandbox build` and `orch sandbox check`.
+
+What is **not** done: the test command still runs on this machine, with your rights, whatever `sandbox` says. That is why the two real repos carry `sandbox: "off"` for now. Phase 2 sends the test run through the container and removes those lines. Until then, everything above under "Tests the builder writes run with your user rights" still applies in full.
 
 ## Safety model
 

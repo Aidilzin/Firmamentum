@@ -266,11 +266,16 @@ that reads `/src/..`, writes to `/src` or opens a socket fails; the warm step pl
 source file; time per run. Write the numbers into this file. Stop and rethink if orch's suite needs more than a handful
 of platform skips.
 
-**Phase 1: the module.**
-1. `sandbox` in the config model, validation, `sandbox: off` warning.
-2. `sandbox.py` with `test_argv`; tests assert `--network none`, the read-only mount, no host env, the label, the limits.
-3. `sandbox/Dockerfile`, entry script, `orch sandbox build` and `orch sandbox check`.
-4. `orch doctor`: engine reachable, image present.
+**Phase 1: the module. Done 16 Nov 2026** (seven commits, `Sandbox 1/7` to `7/7`; the commands below are in the README).
+1. Config: `sandbox` kind per repo (default `docker`), `image`, top-level `sandbox:` limits; an unconfigured path resolves to `docker`; a bare YAML `off` is read as `"off"`; placeholders `sandbox: "off"` on `orch` and `practice` until Phase 2.
+2. `src/orch/sandbox.py`: pure `test_argv`, `warm_argv`, `venv_volume_name`, `build_argv`; `probe` with a cache that keeps only a success, for at most 30 s; `require`, which always asks the engine again.
+3. Fail closed: `services.check_run_request` and `services.drive` (so `run`, `exec`, `resume`, `approve`, `answer`; not `reject`) refuse with exit 2 when Docker or the image is missing.
+4. `sandbox: off` in the warning colour in run headers (plain, rich, no colour), `orch status` and the run log; `meta["sandbox"]` is refreshed on every start, resume, approve and answer.
+5. `orch doctor`: engine, image per distinct image, one warning row per `off` repo.
+6. `sandbox/Dockerfile`, `sandbox/entry.sh`, `.gitattributes` (LF for `sandbox/*`), `orch sandbox build`, `orch sandbox check`.
+7. README and this file.
+
+Left for Phase 2, on purpose: the `src` argument of `test_argv` is only checked for mount-safe characters. The rule "must pass `workspace._guard`" belongs where the worktree path is read, in `_run_cmd`.
 
 **Phase 2: (b).**
 5. `_run_cmd` goes through the sandbox; fail closed when it is unavailable.
