@@ -267,7 +267,7 @@ source file; time per run. Write the numbers into this file. Stop and rethink if
 of platform skips.
 
 **Phase 1: the module. Done 16 Nov 2026** (seven commits, `Sandbox 1/7` to `7/7`; the commands below are in the README).
-1. Config: `sandbox` kind per repo (default `docker`), `image`, top-level `sandbox:` limits; an unconfigured path resolves to `docker`; a bare YAML `off` is read as `"off"`; placeholders `sandbox: "off"` on `orch` and `practice` until Phase 2.
+1. Config: `sandbox` kind per repo (default `docker`), `image`, top-level `sandbox:` limits; an unconfigured path resolves to `docker`; a bare YAML `off` is read as `"off"`; placeholders `sandbox: "off"` on `orch` and `practice` until Phase 2 (removed in Phase 2).
 2. `src/orch/sandbox.py`: pure `test_argv`, `warm_argv`, `venv_volume_name`, `build_argv`; `probe` with a cache that keeps only a success, for at most 30 s; `require`, which always asks the engine again.
 3. Fail closed: `services.check_run_request` and `services.drive` (so `run`, `exec`, `resume`, `approve`, `answer`; not `reject`) refuse with exit 2 when Docker or the image is missing.
 4. `sandbox: off` in the warning colour in run headers (plain, rich, no colour), `orch status` and the run log; `meta["sandbox"]` is refreshed on every start, resume, approve and answer.
@@ -275,13 +275,65 @@ of platform skips.
 6. `sandbox/Dockerfile`, `sandbox/entry.sh`, `.gitattributes` (LF for `sandbox/*`), `orch sandbox build`, `orch sandbox check`.
 7. README and this file.
 
-Left for Phase 2, on purpose: the `src` argument of `test_argv` is only checked for mount-safe characters. The rule "must pass `workspace._guard`" belongs where the worktree path is read, in `_run_cmd`.
+Left for Phase 2, on purpose: the `src` argument of `test_argv` is only checked for mount-safe characters. The rule "must pass `workspace._guard`" belongs where the worktree path is read, in `_run_cmd`. (Done in Phase 2: `Executor._run_sandboxed`.)
 
-**Phase 2: (b).**
-5. `_run_cmd` goes through the sandbox; fail closed when it is unavailable.
-6. Kill containers by label on timeout, cancel and exceptions.
+**Phase 2: (b). Done 16 Nov 2026** (seven commits, `Sandbox Phase 2, 1/7` to `7/7`). Code and fake tests are in; the hand
+checks listed under "Phase 2 hand checks" below are not run yet.
+5. `_run_cmd` goes through the sandbox (`sandbox.run_tests`); fail closed when it is unavailable.
+6. Kill containers by label on timeout, cancel and exceptions (`sandbox.sweep`); orphan sweep on start, resume, approve and
+   answer; doctor warns about orphans.
 7. Warm step with the keyed venv volume; re-warm after an approved dependency change.
 8. Skip the retest when sandboxed.
+9. `orch sandbox test [--probe]`: the same path by hand, plus three planted escape attempts.
+
+What differs from the sketch above:
+- **No `--rm`.** A container is named `orch-<run id>-<8 hex>` and removed by `sweep`, so `docker inspect` can still say
+  why it stopped (exit code, OOM, never started) after the CLI returns.
+- **Exit codes.** The CLI exit code alone proves nothing, so a non-zero exit is checked against the engine:
+
+  | What orch sees | Result |
+  | --- | --- |
+  | docker not on PATH, engine down, image missing before the run | infra |
+  | inspect fails or finds no container (image missing, engine stopped mid-run) | infra, with the first stderr line |
+  | container `created` or `State.Error` set | infra: could not start |
+  | `OOMKilled` | infra: out of memory (limit), raise `sandbox.memory` |
+  | exit 137 without OOM | infra: killed from outside |
+  | CLI exit differs from `State.ExitCode`, or the container is not `exited` | infra: lost contact with the engine |
+  | exit 97 (entry script: copy failed) | infra |
+  | exit 96 (entry script: venv volume not prepared) | warm, then run again; a second 96 is infra |
+  | exit 126 / 127 | unrunnable (test command not found in the image) |
+  | timeout | failed test (goes to repair, as on the host) |
+  | cancel | cancelled |
+  | anything else | the tests ran: exit 0 passes, anything else is a test failure |
+
+  An infra result stops the run (`failed`, step `pending`, `stage: sandbox`, `resume_phase: tests`). No repair call is made
+  and `rounds_used` is untouched.
+- **Warm step source.** The warm container has network and `uv sync` can run build code, so it never mounts the worktree.
+  `warm.warm_tree` exports the run's base commit (`git archive`, no `.git`) and lays over it only the dependency files that
+  differ in the worktree, each of which needs a `new_dependency` approval from any step of the run. An unapproved change
+  stops the run before a container starts. The marker `/venv/.orch-ready` is written last, so a killed warm is never taken
+  for a finished one.
+- **Orphans.** Containers of a run that outlived a hard-killed orch process are removed before the first test run of the
+  next `start`, `resume`, `approve` or `answer` (the run lock proves no live process owns the id). `orch doctor` lists
+  containers whose run is not executing with a live lock, and containers from `orch sandbox test`, with the exact
+  `docker rm -f` command. It never removes anything.
+- **Known limit.** The editable install is made from the base commit. A step that adds a new top-level package in a flat
+  (non-`src/`) layout may need a re-warm. `orch` and `practice` use a `src/` layout and are not affected.
+- **Still on the host:** the builder's own `Bash(uv run pytest -q)` call (Phase 4) and the post-merge run (Phase 3).
+  `orch merge` prints a note about the second for docker repos.
+
+### Phase 2 hand checks (no model call; pending)
+
+1. `orch sandbox build`, then `orch doctor`: no `off` warning for `orch` and `practice`.
+2. `orch sandbox test --repo practice`: the first run warms, then `PASS`; the second does not warm.
+3. `orch sandbox test --repo practice --probe`: real tests pass, three `blocked` lines.
+4. `orch sandbox test --repo orch`: compare with Phase 0 (529 passed, 1 skipped expected).
+5. Cancel (Ctrl-C) and `--timeout 3` during a long run: `docker ps -a --filter label=orch.run` shows nothing afterwards.
+6. A wrong `image:` gives `SANDBOX ERROR`, exit 2. One out-of-memory check with `sandbox.memory: 64m` on a scratch copy
+   whose test allocates 500 MB: expect "out of memory", not "tests failed". This also shows whether `OOMKilled` is set when
+   the killed process is a pytest worker and not PID 1; if it is not, the entry script has to read `memory.events`.
+
+Results: _not run yet._
 
 **Phase 3: (c).**
 9. Merge candidate with `merge-tree` and `commit-tree`; test in a temp worktree; fast-forward only on pass.

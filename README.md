@@ -125,6 +125,7 @@ Every command that takes a run id also accepts a unique prefix of it and `--repo
 | `version` | Prints the orch, claude and agy versions (costs no quota) | `orch version` |
 | `sandbox build` | Builds the Docker sandbox image from `sandbox/` (needs Docker running and network) | `orch sandbox build` |
 | `sandbox check` | Shows whether a repo's tests would use the sandbox and the exact `docker run` command. Runs nothing | `orch sandbox check --repo orch` |
+| `sandbox test` | Runs a repo's tests in the sandbox by hand, through the same code a real run uses. No model call (`--src DIR`, `--retest`, `--timeout S`, `--probe` plants three escape attempts) | `orch sandbox test --repo practice --probe` |
 | `plan` | Asks Laplace for a plan and stores it (`--scout` adds Brillouin) | `orch plan "add a --json flag to usage" --repo orch` |
 | `runs` | Lists stored runs, newest first | `orch runs --repo orch` |
 | `show` | Prints a stored plan | `orch show 20261110T --repo orch` |
@@ -209,13 +210,13 @@ post_checks:                            # optional: file patterns that stop a st
 ui: { theme: dark }                     # dark | light (optional)
 sandbox: { image: "orch-sbx:py312", memory: 4g, cpus: 4 }   # optional; these are the defaults (see "Security model and limits")
 repos:                                  # the ONLY source of test commands
-  orch:     { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf", sandbox: "off" }
-  practice: { path: "../orch-practice", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf", sandbox: "off" }
+  orch:     { path: ".", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
+  practice: { path: "../orch-practice", test_command: "uv run pytest -q", retest_command: "uv run pytest -q --lf" }
 ```
 
 - `env_passthrough: [NAME, ...]` on a repo adds environment variable names that workers and test runs may see. Everything else in your environment is withheld (see "Security model and limits").
-- `sandbox: docker` (the default) or `sandbox: "off"` on a repo. A repo without the key is `docker`, and so is a path that is not in `config.yaml`. `off` is the only way to run without Docker; `orch doctor` and every run header show it in the warning colour. `image: NAME` on a repo uses a different sandbox image. The two `off` lines above are placeholders until sandbox Phase 2 (see below).
-- `test_command` gates every commit. `retest_command` is optional and is a quick re-run tried first in repair rounds.
+- `sandbox: docker` (the default) or `sandbox: "off"` on a repo. A repo without the key is `docker`, and so is a path that is not in `config.yaml`. `off` is the only way to run without Docker; `orch doctor` and every run header show it in the warning colour. `image: NAME` on a repo uses a different sandbox image.
+- `test_command` gates every commit. `retest_command` is optional and is a quick re-run tried first in repair rounds. For a `docker` repo the retest is skipped (a fresh container has no `--lf` cache), so repair rounds run only `test_command`; `orch sandbox test --retest` still runs it by hand.
 - Relative repo paths resolve against the folder that holds `config.yaml`.
 - If the first entry of a role hits a limit, the next entry is tried once. The entry used is shown in the live view and in `orch status`.
 
@@ -223,20 +224,25 @@ repos:                                  # the ONLY source of test commands
 
 **The worktree is not a sandbox.** It keeps agents away from your checkout, nothing more.
 
-- **Tests the builder writes run with your user rights.** The test command (`uv run pytest -q` and so on) executes whatever test code or `conftest.py` the builder wrote, as you, on this machine. orch runs it again itself and once more in your real checkout after `orch merge`. The deny rules for `git`, `rm` and `pip` apply to the agent's Bash tool, not to code a test runs.
+- **For a `sandbox: off` repo, tests the builder writes run with your user rights.** The test command (`uv run pytest -q` and so on) executes whatever test code or `conftest.py` the builder wrote, as you, on this machine. For a `docker` repo that is no longer true of orch's own test runs (below), but two paths still run on the host: the builder's own `Bash(uv run pytest -q)` call while it works (Phase 4) and the test run after `orch merge` in your real checkout (Phase 3). The deny rules for `git`, `rm` and `pip` apply to the agent's Bash tool, not to code a test runs.
 - **So only run orch on your own repos, with tasks you wrote.** Do not paste issue text, README content or web pages you do not trust into a request: a prompt injection there can make the builder write a test that does anything you can do.
 - What the flags do limit: Claude workers run with `--restricted --strict-mcp-config` (file tools confined to the worktree, your settings, hooks and MCP servers ignored), Bash is allowed only for the exact test commands from `config.yaml`, and workers and test runs see an allow-listed environment instead of your whole one (no API keys, tokens or cloud credentials unless you list them in `env_passthrough`). What they do not limit: the test process itself.
 - Review the diff before `orch merge`, especially test files, `conftest.py`, CI files and anything that stops for approval.
 - A real sandbox is the only complete answer. It is being built in phases (below). The audit and probe notes are in `docs/audit-fable.md` and `docs/probe-results.md`.
 
-**Docker sandbox: Phase 1 is in, tests do not run in a container yet.** The plan is in `docs/sandbox-design.md` and the hand checks in `docs/sandbox-phase0.md`. Agent-written tests will run in a container with no network, a read-only copy of the source, no git metadata and none of your environment. What exists today:
+**Docker sandbox: Phase 2 is in. orch's own test runs go through a container.** The plan is in `docs/sandbox-design.md` and the hand checks in `docs/sandbox-phase0.md`. For a `docker` repo, every test run orch starts (the first run of a step and every repair round) runs in a container with no network, a read-only copy of the source, no git metadata and none of your environment. What exists:
 
-- The `sandbox` settings in `config.yaml`, with `docker` as the default and an explicit `sandbox: "off"` per repo as the only opt-out.
+- The `sandbox` settings in `config.yaml`, with `docker` as the default and an explicit `sandbox: "off"` per repo as the only opt-out. `orch` and `practice` are now `docker`.
 - **Fail closed.** For a `docker` repo, `run`, `exec`, `resume`, `approve` and `answer` stop with `Error: Docker is not running ...` (exit 2) when the engine or the image is missing. They ask Docker again every time, so a cached answer never lets a run through. There is no fallback to running unsandboxed.
-- `orch doctor` checks the engine, the image and warns for every repo that is `off`. Run headers, `orch status` and the run log show `sandbox: off` in the warning colour.
-- `orch sandbox build` and `orch sandbox check`.
+- **Tests run in the container.** The worktree path is checked by `workspace._guard` right before the `docker run` is built, and is mounted read-only. The entry script copies it to a memory-backed `/work` (no `.git`, no `.venv`), so a test run cannot change the worktree.
+- **A container problem is never a failed test.** After a non-zero exit orch asks the engine what happened to the container. Missing image, engine stopped mid-run, a container that never started, out of memory (`sandbox.memory`), a kill from outside or a failed source copy stop the run as `failed` with the step left `pending` (`stage: sandbox`), **no repair call is made**, and `orch resume` continues at the tests once you fixed it. A test that really fails (any other exit code), or that times out, goes to repair as before. The exit codes 96 (venv not ready) and 97 (copy failed) are reserved by the image; a test that exits with one only stops the run, it can never pass.
+- **Timeouts and cancel stop the container, not just the docker CLI.** Every container carries the label `orch.run=<run id>`. On pass, fail, timeout, cancel, Ctrl-C and any exception, orch removes every container with that label (`docker rm -f`). `start`, `resume`, `approve` and `answer` also remove leftovers of the same run before the first test run, and `orch doctor` warns about containers whose run is not executing (with the exact `docker rm -f ...`); it removes nothing itself.
+- **The warm step** (the only container with network) installs the project's dependencies into a named volume, once per dependency change. It never sees the worktree: it gets the run's base commit plus the dependency files you approved (`new_dependency`). A changed dependency file nobody approved stops the run before anything starts.
+- Repair rounds use the same sandbox. They skip the quick retest (no `--lf` cache in a fresh container).
+- `orch doctor` checks the engine, the image, leftover containers and warns for every repo that is `off`. Run headers, `orch status` and the run log show `sandbox: off` in the warning colour.
+- `orch sandbox build`, `orch sandbox check` and `orch sandbox test`. `orch sandbox test --repo practice` runs the repo's tests by hand through exactly the path a real run uses (no model call). `--probe` runs them on a scratch export of `HEAD` with three planted tests that try to write outside the working copy, open a socket and read a host environment variable (a canary set in the docker CLI's own environment); each passes only when the attempt fails inside, so a green run means the real tests passed and all three attempts were blocked.
 
-What is **not** done: the test command still runs on this machine, with your rights, whatever `sandbox` says. That is why the two real repos carry `sandbox: "off"` for now. Phase 2 sends the test run through the container and removes those lines. Until then, everything above under "Tests the builder writes run with your user rights" still applies in full.
+What is **not** done, and still runs on this machine with your rights: **(a)** the builder's and repair agent's own `Bash(uv run pytest -q)` call while they work (Phase 4), and **(b)** the test run after `orch merge`, in your real checkout (Phase 3; `orch merge` prints a note about it for docker repos). Known limits: tests run on Linux, so Windows-only code paths are not gated; the editable install is made from the base commit, so a step that adds a new top-level package in a flat (non-`src/`) layout may need a re-warm; a container escape would reach the Docker Desktop VM.
 
 ## Safety model
 
