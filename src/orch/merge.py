@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal
 
-from . import sandbox, warm, workspace
+from . import runlock, sandbox, warm, workspace
 from .adapters.process import child_env, run_process
 from .config import Config, PostChecksConfig, ResolvedRepo, SandboxConfig
 from .runs import load_meta, write_meta
@@ -114,6 +114,20 @@ def merge_run(
     repo: ResolvedRepo, run_dir: Path, allow_main: bool = False, *, cfg: Config | None = None,
     log: Callable[[str], None] = lambda m: None, cancel: threading.Event | None = None,
 ) -> MergeResult:  # fmt: skip
+    """Merge a done run. Holds the run's lock for the whole time, so a second merge (or a resume) of the same run cannot
+    race this one, and `orch doctor` can tell these containers from orphans."""
+    try:
+        lock = runlock.acquire(run_dir)
+    except runlock.RunLocked as e:
+        raise MergeError(f"this run is in use by {e.info.describe()}; wait for it or stop it, then merge again") from e
+    try:
+        return _merge_locked(repo, run_dir, allow_main, cfg, log, cancel)
+    finally:
+        lock.release()
+
+
+def _merge_locked(repo: ResolvedRepo, run_dir: Path, allow_main: bool, cfg: Config | None, log: Callable[[str], None],
+                  cancel: threading.Event | None) -> MergeResult:  # fmt: skip
     meta = load_meta(run_dir)
     ex = meta.get("exec")
     if meta.get("status") != "done" or not ex:

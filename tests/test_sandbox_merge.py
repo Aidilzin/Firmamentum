@@ -2,14 +2,15 @@
 branch moves only on a pass. Everything against the fake engine; nothing starts Docker."""
 
 
-import pytest
+import threading
 from pathlib import Path
 
+import pytest
 from git_helpers import git
 from plan_factory import good_plan, step
 from test_executor import PASS_CMD, edit, env  # noqa: F401  (env is a fixture)
 
-from orch import sandbox, warm
+from orch import runlock, sandbox, warm, workspace
 from orch.adapters.process import ProcessOutput
 from orch.checks import RULE_DEPENDENCY
 from orch.merge import MergeError, merge_run
@@ -184,3 +185,62 @@ def test_a_dependency_file_changed_on_both_sides_is_never_warmed_even_if_approve
     r = merge_run(rr, run_dir)
     assert r.outcome == "cannot_run" and "changed on both sides" in r.tests_detail
     assert len(fake_docker.runs) == 1 and git(repo, "log", "-1", "--format=%s").strip() == "your own dependency change"
+
+
+# ---------- lock, leftovers, Ctrl-C ----------
+
+def test_a_run_that_is_in_use_cannot_be_merged(done, fake_docker):
+    repo, run_dir, rr = done
+    held = runlock.acquire(run_dir)
+    try:
+        before = git(repo, "rev-parse", "HEAD")
+        with pytest.raises(MergeError, match="in use by"):
+            merge_run(rr, run_dir)
+        assert git(repo, "rev-parse", "HEAD") == before and fake_docker.runs == []
+    finally:
+        held.release()
+    assert merge_run(rr, run_dir).outcome == "merged"  # the lock is released again after a merge
+    assert runlock.holder(run_dir) is None
+
+
+def test_the_lock_is_released_after_a_refusal_too(done):
+    repo, run_dir, rr = done
+    git(repo, "checkout", "-q", "main")
+    with pytest.raises(MergeError, match="allow-main"):
+        merge_run(rr, run_dir)
+    assert runlock.holder(run_dir) is None
+
+
+def test_a_worktree_left_by_a_killed_merge_is_replaced(done, isolated_worktree_root):
+    repo, run_dir, rr = done
+    name = f"merge-{run_dir.name}"
+    stale = workspace.add_detached(repo, load_meta(run_dir)["exec"]["repo_name"], name, workspace.commit_sha(repo, "HEAD"))
+    (stale / "stale.txt").write_text("x", encoding="utf-8")
+    assert merge_run(rr, run_dir).outcome == "merged"
+    assert not stale.exists()
+
+
+def test_cancel_merges_nothing_and_cleans_up(done, fake_docker):
+    repo, run_dir, rr = done
+    cancel = threading.Event()
+    cancel.set()
+    before = git(repo, "rev-parse", "HEAD")
+    r = merge_run(rr, run_dir, cancel=cancel)
+    assert r.outcome == "cancelled" and r.sha == "" and r.tests_passed is None
+    assert git(repo, "rev-parse", "HEAD") == before and "merged_sha" not in load_meta(run_dir)
+    assert fake_docker.boxes == {} and runlock.holder(run_dir) is None
+    assert not any("merge-" in ln for ln in git(repo, "worktree", "list").splitlines())
+
+
+def test_an_interrupt_during_the_tests_still_cleans_up(done, fake_docker, monkeypatch):
+    repo, run_dir, rr = done
+
+    def boom(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sandbox, "docker_run", boom)
+    before = git(repo, "rev-parse", "HEAD")
+    with pytest.raises(KeyboardInterrupt):
+        merge_run(rr, run_dir)
+    assert git(repo, "rev-parse", "HEAD") == before and runlock.holder(run_dir) is None
+    assert not any("merge-" in ln for ln in git(repo, "worktree", "list").splitlines())

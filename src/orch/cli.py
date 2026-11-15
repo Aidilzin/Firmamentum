@@ -611,7 +611,16 @@ def merge(
     target = _repo_or_exit(ctx.obj, repo)
     run_dir = _find_or_exit(target, run_id)
     cfg = _load_cfg(ctx.obj, None)
-    r = _or_exit(services.merge, target, run_dir, allow_main=allow_main, cfg=cfg, log=lambda m: typer.echo(m, err=True))
+    stop = _PlanStop()  # Ctrl-C: the 1st press cancels the test run, the 2nd stops now; nothing is merged either way
+    previous = _install_sigint(stop)
+    try:
+        r = _or_exit(services.merge, target, run_dir, allow_main=allow_main, cfg=cfg, cancel=stop.event,
+                     log=lambda m: typer.echo(m, err=True))  # fmt: skip
+    except KeyboardInterrupt:
+        typer.echo("Stopped by you. Nothing was merged; the container and the temporary worktree were removed.", err=True)
+        raise typer.Exit(130)
+    finally:
+        _restore_sigint(previous)
     if r.outcome == "already":
         typer.echo(f"{r.branch} is already part of {r.target}; recorded {r.sha[:8]}. No tests were run.")
         return

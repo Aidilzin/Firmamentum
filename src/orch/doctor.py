@@ -85,6 +85,7 @@ class Context:
     is_git_repo: Callable[[Path], bool] = lambda p: workspace.git(p, "rev-parse", "--git-dir", check=False).returncode == 0
     docker: Callable[[str], sandbox.ProbeResult] = lambda image: sandbox.docker_probe(image)  # always asks the engine
     containers: Callable[[], list[sandbox.Container]] = lambda: sandbox.list_containers()
+    git_version: Callable[[], tuple[int, int] | None] = lambda: workspace.git_version()
 
 
 def _writable(directory: Path) -> str | None:
@@ -121,6 +122,18 @@ def check_tool(ctx: Context, name: str, level_missing: str, fix: str) -> Check:
     if not path:
         return Check(name, level_missing, "not found on PATH", fix)
     return Check(name, OK, short_path(path))
+
+
+def check_git_version(ctx: Context) -> Check:
+    """`orch merge` builds the merge result with `git merge-tree --write-tree`, which needs git 2.38 or newer."""
+    need = workspace.MIN_GIT
+    ver = ctx.git_version()
+    if ver is None:
+        return Check("git version", WARN, "could not read `git --version`", f"orch merge needs git {need[0]}.{need[1]} or newer")
+    if ver < need:
+        return Check("git version", ERR, f"{ver[0]}.{ver[1]}: orch merge needs {need[0]}.{need[1]} or newer (git merge-tree --write-tree)",
+                     "update Git for Windows: winget upgrade Git.Git")  # fmt: skip
+    return Check("git version", OK, f"{ver[0]}.{ver[1]}")
 
 
 def check_cli(ctx: Context, name: str, level_missing: str, fix: str) -> Check:
@@ -354,6 +367,7 @@ def run_checks(ctx: Context | None = None) -> list[Check]:
         check_python(ctx),
         check_tool(ctx, "uv", WARN, "install uv: https://docs.astral.sh/uv/"),
         check_tool(ctx, "git", ERR, "install Git for Windows and put it on PATH"),
+        check_git_version(ctx),
         check_cli(ctx, "claude", ERR, "install Claude Code and make sure `claude` is on PATH"),
         check_agy(ctx, cfg),
         *check_process_env(ctx),

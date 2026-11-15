@@ -194,3 +194,23 @@ def test_doctor_only_lists_it_never_removes(tmp_path, fake_docker):
     checks = doctor.run_checks(ctx_for(tmp_path, config_path=cfg, docker=Engine()))  # the real list_containers on the fake engine
     assert len(orphan_rows(checks)) == 1
     assert "rm" not in fake_docker.verbs() and len(fake_docker.boxes) == 1
+
+
+# ---------- git version (orch merge needs `git merge-tree --write-tree`) ----------
+
+
+def test_a_new_enough_git_is_ok(tmp_path):
+    c = by_name(doctor.run_checks(ctx_for(tmp_path, git_version=lambda: (2, 38))))["git version"]
+    assert c.level == doctor.OK and c.detail == "2.38"
+
+
+def test_an_old_git_is_an_error_that_names_merge_tree(tmp_path):
+    checks = doctor.run_checks(ctx_for(tmp_path, git_version=lambda: (2, 37)))
+    c = by_name(checks)["git version"]
+    assert c.level == doctor.ERR and "2.38" in c.detail and "merge-tree" in c.detail and "winget upgrade Git.Git" in c.fix
+    assert doctor.exit_code(checks) == 1
+
+
+def test_an_unreadable_git_version_is_a_warning(tmp_path):
+    c = by_name(doctor.run_checks(ctx_for(tmp_path, git_version=lambda: None)))["git version"]
+    assert c.level == doctor.WARN and "2.38" in c.fix

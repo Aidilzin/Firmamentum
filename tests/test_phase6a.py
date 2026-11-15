@@ -326,7 +326,7 @@ def ctx_for(tmp_path, **over):
         env={}, home=tmp_path / "home", which=lambda n: f"C:/bin/{n}.exe", version=lambda n: f"{n} 1.2.3",
         auth_status=lambda: GOOD_AUTH, user_env=lambda k: None, config_path=over.get("config_path") or _cfg_file(tmp_path),
         db_path=tmp_path / "db" / "usage.db", wt_root=lambda: tmp_path / "wt", python=(3, 12),
-        has_tzdata=lambda: True, is_git_repo=lambda p: True,
+        has_tzdata=lambda: True, is_git_repo=lambda p: True, git_version=lambda: (2, 56),
     )  # fmt: skip
     base.update(over)
     return doctor.Context(**base)

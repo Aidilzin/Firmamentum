@@ -650,6 +650,19 @@ def test_a_checkout_that_changed_during_the_tests_is_not_merged(done_run):
     assert git(repo, "rev-parse", "HEAD") == before and "merged_sha" not in load_meta(run_dir)
 
 
+def test_cli_merge_ctrl_c_says_nothing_was_merged(done_run, tmp_path, monkeypatch):
+    repo, run_dir, rr = done_run
+    write_cfg(tmp_path, monkeypatch, repo)
+
+    def interrupted(*a, **k):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.services, "merge", interrupted)
+    r = CliRunner().invoke(cli.app, ["merge", run_dir.name, "--repo", "demo"])
+    assert r.exit_code == 130 and "Nothing was merged" in r.output
+    assert git(repo, "log", "-1", "--format=%s").strip() == "init"
+
+
 def test_cli_merge(done_run, tmp_path, monkeypatch):
     repo, run_dir, rr = done_run
     write_cfg(tmp_path, monkeypatch, repo)
