@@ -158,7 +158,7 @@ def test_review_reject_repair_then_approve(env):
 def test_test_fail_repair_pass_with_retest(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=FILE_CMD)
-    rr = rr.model_copy(update={"retest_command": PASS_CMD})  # quick command passes; only the full one gates
+    rr = rr.model_copy(update={"retest_command": PASS_CMD, "sandbox": "off"})  # quick command passes; only the full one gates
     ex, fb = executor(
         run_dir, rr,
         [edit({"src/s1.py": "a = 1\n"}), edit({"src/s1.py": "a = 2\n"}), edit({"ok.txt": "1"})],
@@ -180,7 +180,7 @@ def test_test_fail_repair_pass_with_retest(env):
 def test_failing_retest_skips_full_run(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=FILE_CMD)
-    rr = rr.model_copy(update={"retest_command": 'python -c "import sys; sys.exit(1)"'})
+    rr = rr.model_copy(update={"retest_command": 'python -c "import sys; sys.exit(1)"', "sandbox": "off"})
     ex, _ = executor(run_dir, rr, [edit({"src/s1.py": "a\n"}), edit({"ok.txt": "1"})], review="off", max_repair_rounds=1)
     assert ex.start().status == "awaiting_approval"
     s1 = load_meta(run_dir)["steps"]["s1"]

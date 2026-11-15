@@ -162,7 +162,7 @@ def _step_view(sid: str, st: dict, first_entries: dict[str, str], live_elapsed: 
         id=sid, title=st.get("title", ""), status=status, kind=step_kind(status), role=role,
         phase=PHASE_LABEL.get(phase, phase) if phase else None, round=st.get("rounds_total", 0),
         tokens=st.get("tokens", 0), elapsed=elapsed, entry=entry, commit=st.get("commit"),
-        tests=None if not t else ("pass" if t.get("passed") else f"FAIL({t.get('exit_code')})"),
+        tests=None if not t else ("pass" if t.get("passed") else "sandbox error" if t.get("infra") else f"FAIL({t.get('exit_code')})"),
         verdict=reviews[-1]["verdict"] if reviews else None, error=st.get("error"),
     )  # fmt: skip
 
@@ -255,7 +255,8 @@ def build_run_view(
         demons=_demon_lines(meta, steps, models, by_role, raw_steps), sandbox=meta.get("sandbox"),
     )  # fmt: skip
     if stop is None and status in ("failed", "needs_input", "awaiting_approval", "paused", "cancelled", "rejected"):
-        bad = next((s.id for s in steps if s.status in STOPPED_STEP_STATES or s.error in ("rate limited", "cancelled")), None)
+        bad = next((s.id for s in steps if s.status in STOPPED_STEP_STATES or s.error in ("rate limited", "cancelled")
+                     or raw_steps[s.id].get("stage") == "sandbox"), None)
         stop = (status, bad, "")
     if stop is not None and stop[0] != "done":
         view.stop = stop_info(stop[0], stop[1], stop[2], meta, next_cmds or [])

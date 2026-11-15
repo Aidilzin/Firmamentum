@@ -113,6 +113,8 @@ def next_actions(meta: dict, run_dir: Path, repo_name: str | None = None) -> lis
             out.append(act("answer_step", sid, st.get("question")))
         elif status == "failed":
             out.append(act("step_failed", sid, st.get("error"), path=run_dir / "steps" / sid))
+        elif status == "pending" and stage == "sandbox":
+            out.append(act("resume", reason=f"after you fix the sandbox: {st.get('error')}"))
         elif status == "pending" and st.get("error") == "rate limited":
             out.append(act("resume", reason="after the usage limit resets"))
         elif status == "pending" and st.get("error") == "cancelled":

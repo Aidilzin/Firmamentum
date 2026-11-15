@@ -31,6 +31,8 @@ from .adapters.claude_code import CONFINE_ARGS
 from .adapters.process import child_env, run_process
 from . import review as review_mod
 from . import runlock
+from . import sandbox
+from . import warm
 from .build import BuildReport, load_schema_file
 from .checks import classify, is_self_hosting_repo, outside_plan
 from .config import Config, Entry, ResolvedRepo
@@ -382,6 +384,7 @@ class Executor:
         self._interrupting = False
         self._crash_commit_sid: str | None = None  # a step found `running` at phase commit: its commit may already exist
         self.last_called = False  # False when the last _agent() found every entry cooling and called nothing
+        self._retest_skipped: set[str] = set()  # steps whose skipped retest was already logged
 
     # -- cancel --
     def cancel(self) -> None:
@@ -649,6 +652,7 @@ class Executor:
         steps = self.meta["steps"]
         self._run_started = True  # past the preconditions: from here every exit ends with one terminal event
         self._emit(RunStarted, action=self._action)
+        self._sweep_orphans()
         for step in self.plan.topo_order():
             st = self._st(step.id)
             if st["status"] == "done":
@@ -674,6 +678,19 @@ class Executor:
         self._mark_run_end()
         self._save()
         return ExecOutcome("done", None, "all steps done")
+
+    def _sweep_orphans(self) -> None:
+        """Containers of this run's label that an earlier orch process left behind (it was killed hard). The run lock
+        guarantees no live process owns this run id, so every container with the label is a leftover. Never fails the run."""
+        if self.repo.sandbox != "docker":
+            return
+        try:
+            gone = sandbox.sweep(self.run_dir.name, self.log)
+        except sandbox.SandboxError as e:  # a run id docker cannot take as a label value; run_tests will report it
+            self.log(f"warning: no orphan sweep: {e}")
+            return
+        if gone:
+            self.log(f"removed {len(gone)} sandbox container(s) left over from an earlier process of this run")
 
     def _warn(self, sid: str, msg: str) -> None:
         s = self._st(sid)
@@ -852,6 +869,11 @@ class Executor:
                 state = self._tests(sid, sdir)
                 if state == "cancelled":
                     return self._cancelled(sid, "tests")
+                if state == "infra":  # the container could not run the tests: nothing failed, so nothing goes to repair
+                    err = (self._st(sid)["tests"] or {}).get("error") or "the sandbox could not run the tests"
+                    self._set_step(sid, status="pending", error=err, stage="sandbox", resume_phase="tests")
+                    return self._stop("failed", sid, f"sandbox could not run the tests for {sid}: {err}. Nothing was sent to "
+                                      "repair. Fix it, then `orch resume`.")  # fmt: skip
                 if state == "broken":
                     tests = self._st(sid)["tests"] or {}
                     self._set_step(sid, status="failed", error=tests.get("error") or "tests could not run", stage="tests")
@@ -931,7 +953,12 @@ class Executor:
         in_repair = bool(st["rounds"])
         sfx = f"_r{st['rounds_total']}" if in_repair else ""
         cur = st["rounds"][-1] if in_repair else None
-        if in_repair and self.retest_command and self.retest_command != self.test_command:
+        has_retest = in_repair and self.retest_command and self.retest_command != self.test_command
+        if has_retest and self.repo.sandbox == "docker":
+            if sid not in self._retest_skipped:  # `--lf` needs a cache; a fresh container has none, so it would run it all
+                self._retest_skipped.add(sid)
+                self.log(f"[{sid}] sandbox: the quick retest is skipped (a fresh container has no --lf cache); running the full tests")
+        elif has_retest:
             ok, info = self._run_cmd(self.retest_command, sdir / f"retest{sfx}.txt")
             if info.get("cancelled"):
                 return "cancelled"
@@ -949,6 +976,8 @@ class Executor:
         if cur is not None:
             cur["tests"] = info
         self._set_step(sid, tests=info)
+        if info.get("infra"):
+            return "infra"
         if info.get("unrunnable"):
             return "broken"
         if not ok:
@@ -957,13 +986,16 @@ class Executor:
         return "pass"
 
     def _run_cmd(self, command: str, out_file: Path) -> tuple[bool, dict]:
-        """Run a config command in the worktree. Pass/fail by exit code only."""
+        """Run a config command on the worktree. Pass/fail by exit code only. For a `sandbox: docker` repo it runs in the
+        container (sandbox.run_tests); a container problem is reported as `infra`, never as a failed test."""
         t0 = time.perf_counter()
         try:
             argv = shlex.split(command)
         except ValueError as e:
             return False, {"exit_code": None, "passed": False, "error": f"bad test_command: {e}", "duration_s": 0,
                            "unrunnable": True}  # fmt: skip
+        if self.repo.sandbox == "docker":
+            return self._run_sandboxed(command, argv, out_file, t0)
         out = run_process(argv, cwd=self.wt, env=child_env(passthrough=self.repo.env_passthrough), timeout_s=TEST_TIMEOUT_S,
                           cancel=self._cancel)  # fmt: skip
         if out.cancelled:
@@ -979,6 +1011,35 @@ class Executor:
             "exit_code": out.returncode, "passed": passed, "error": err,
             "duration_s": round(time.perf_counter() - t0, 1), "unrunnable": out.not_found,
         }  # fmt: skip
+
+    def _warm_source(self):
+        """The warm step's folder: this run's base commit plus the dependency files you approved (never the worktree)."""
+        return warm.warm_tree(self.repo.path, self.wt, self.meta["exec"]["base_sha"], self.run_dir.name,
+                              self.cfg.post_checks.dependency, warm.approved_dependency_files(self.meta))  # fmt: skip
+
+    def _run_sandboxed(self, command: str, argv: list[str], out_file: Path, t0: float) -> tuple[bool, dict]:
+        base = {"sandbox": "docker", "unrunnable": False}
+        try:  # the path is read back from meta.json, which the builder may have been able to write: check it right here
+            src = workspace._guard(self.wt, self.repo.path, self._branch)
+        except workspace.GuardError as e:
+            return False, {**base, "exit_code": None, "passed": False, "error": f"worktree refused: {e}", "duration_s": 0,
+                           "unrunnable": True}  # fmt: skip
+        res = sandbox.run_tests(self.repo, self.cfg.sandbox, src, argv, self.run_dir.name, warm_src=self._warm_source,
+                                timeout_s=TEST_TIMEOUT_S, cancel=self._cancel, log=self.log)  # fmt: skip
+        if res.kind == "cancelled":
+            return False, {**base, "exit_code": None, "passed": False, "error": "cancelled", "duration_s": 0, "cancelled": True}
+        text = f"$ {command}\n[sandbox: docker]\n[exit {res.exit_code}]\n{res.stdout}\n--- stderr ---\n{res.stderr}\n"
+        if res.kind == "timed_out":
+            text += "\n[timed out]\n"
+        if res.kind in ("infra", "unrunnable"):
+            text += f"\n[sandbox: {res.detail}]\n"
+        out_file.write_text(text, encoding="utf-8")
+        err = {"timed_out": "timed out", "unrunnable": "test command not found", "infra": res.detail}.get(res.kind, "")
+        info = {**base, "exit_code": res.exit_code, "passed": res.passed, "error": err,
+                "duration_s": round(time.perf_counter() - t0, 1), "unrunnable": res.kind == "unrunnable"}  # fmt: skip
+        if res.kind == "infra":
+            info["infra"] = True
+        return res.passed, info
 
     # -- review --
     def _review(self, step: Step, sdir: Path) -> review_mod.Review | ExecOutcome:
