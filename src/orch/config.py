@@ -178,12 +178,14 @@ def apply_overrides(cfg: Config, overrides: list[str]) -> Config:
     return cfg.model_copy(update={"roles": roles})
 
 
-def resolve_repo(cfg: Config, name_or_path: str | None) -> ResolvedRepo:
-    """`None` means the current directory. A configured name wins over a path of the same text."""
+def resolve_repo(cfg: Config, name_or_path: str | None, cwd: Path | None = None) -> ResolvedRepo:
+    """`None` means the current directory (`cwd` when given, else the process cwd); a relative path resolves against it too.
+    A configured name wins over a path of the same text."""
     if name_or_path and name_or_path in cfg.repos:
         r = cfg.repos[name_or_path]
         return ResolvedRepo(name=name_or_path, path=(cfg.base_dir / r.path).resolve(), test_command=r.test_command, retest_command=r.retest_command, env_passthrough=r.env_passthrough)
-    path = Path(name_or_path).resolve() if name_or_path else Path.cwd().resolve()
+    base = Path(cwd) if cwd is not None else Path.cwd()
+    path = (base / name_or_path).resolve() if name_or_path else base.resolve()  # an absolute name_or_path wins over base
     if not path.is_dir():
         raise ConfigError(f"repo {name_or_path!r} is neither a configured name nor an existing directory")
     for name, r in cfg.repos.items():
