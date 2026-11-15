@@ -278,7 +278,7 @@ of platform skips.
 Left for Phase 2, on purpose: the `src` argument of `test_argv` is only checked for mount-safe characters. The rule "must pass `workspace._guard`" belongs where the worktree path is read, in `_run_cmd`. (Done in Phase 2: `Executor._run_sandboxed`.)
 
 **Phase 2: (b). Done 16 Nov 2026** (seven commits, `Sandbox Phase 2, 1/7` to `7/7`). Code and fake tests are in; the hand
-checks listed under "Phase 2 hand checks" below are not run yet.
+checks are in "Phase 2 hand checks" below (all six passed on 16 Nov 2026, after three fixes).
 5. `_run_cmd` goes through the sandbox (`sandbox.run_tests`); fail closed when it is unavailable.
 6. Kill containers by label on timeout, cancel and exceptions (`sandbox.sweep`); orphan sweep on start, resume, approve and
    answer; doctor warns about orphans.
@@ -322,7 +322,7 @@ What differs from the sketch above:
 - **Still on the host:** the builder's own `Bash(uv run pytest -q)` call (Phase 4) and the post-merge run (Phase 3).
   `orch merge` prints a note about the second for docker repos.
 
-### Phase 2 hand checks (no model call; pending)
+### Phase 2 hand checks (no model call; done 16 Nov 2026)
 
 1. `orch sandbox build`, then `orch doctor`: no `off` warning for `orch` and `practice`.
 2. `orch sandbox test --repo practice`: the first run warms, then `PASS`; the second does not warm.
@@ -333,7 +333,29 @@ What differs from the sketch above:
    whose test allocates 500 MB: expect "out of memory", not "tests failed". This also shows whether `OOMKilled` is set when
    the killed process is a pytest worker and not PID 1; if it is not, the entry script has to read `memory.events`.
 
-Results: _not run yet._
+Results (Docker Desktop 29.9.3, image `orch-sbx:py312` 172b737b484d, no model call):
+
+| # | Check | Result |
+| --- | --- | --- |
+| 1 | `orch sandbox build`, `orch sandbox check`, `orch doctor` | Built; doctor: 19 checks, 0 failed, 1 to look at (the agy login note, unrelated). No `off` warning for `orch` or `practice`, engine and image rows OK. |
+| 2 | `orch sandbox test --repo practice`, twice | First run warmed ("preparing the test environment"), 3 passed, `PASS`. Second run did not warm, 3 passed. |
+| 3 | `... --probe` | First attempt **found a bug in the probe**: `/mnt` exists, empty, in the base image, so the drive check reported a false `ESCAPED`, and `PROBE FAILED` printed the source line of the assert instead of its message. Fixed (below). After the fix: 6 passed, three `blocked` lines (write: read-only file system on `/src`, `/`, `/etc`, `/work/..`; network: `Network is unreachable`; host env: canary, `USERPROFILE`, `APPDATA`, `LOCALAPPDATA`, `ANTHROPIC_API_KEY` unset and no host drive), `PROBE OK`. |
+| 4 | `orch sandbox test --repo orch` | First attempt: 778 passed, 1 failed, 1 skipped. The failure was our own `test_a_dependency_file_that_is_a_symlink_is_refused`, which skipped on Windows and ran on Linux for the first time: the link is refused with "outside the project", not "not a regular file". The test now accepts either refusal and still asserts the refusal. After the fix: **780 passed, 1 skipped (the Windows file-sharing skip), `PASS`, 83 s wall** (Phase 0: 529 tests, 23 s with `-n 4`; this run is serial). The earlier `norm_path` failure from Phase 0 is gone. |
+| 5 | Ctrl-C during the `orch` run, then `docker ps -a --filter label=orch.run` | "Stopped by you. The container of this test run was removed." and the listing was empty. `--timeout 3` was covered by the fake-engine test only; not repeated by hand. |
+| 6a | Wrong image (`image: orch-sbx:does-not-exist`, scratch config) | `SANDBOX ERROR: image ... not found. Build it with orch sandbox build ... Nothing was run.`, exit 2. |
+| 6b | Out of memory: scratch copy of `practice` plus a test that allocates 500 MB, `sandbox.memory: 64m` | `SANDBOX ERROR: out of memory (limit 64m); raise sandbox.memory in config.yaml`, exit 2, not "tests failed". `OOMKilled` is set even though the killed process is a pytest child and not PID 1 (`uv` is PID 1), so the entry script does not need to read `memory.events`. No container left. |
+
+The scratch config and the scratch copy lived in the session scratchpad; the repo's `config.yaml` was not touched and is unchanged.
+
+Fixes made after the hand checks (commit "Sandbox Phase 2 fixes from the hand checks"):
+- The probe's drive check is strict but no longer trips on an empty `/mnt`: each of `/c`, `/mnt`, `/mnt/c`, `/mnt/host`,
+  `/host_mnt`, `/host_mnt/c` fails only if it is a mount point, a link, not a folder, or holds anything.
+- `PROBE FAILED` prints the `E   AssertionError: ESCAPED: ...` line of the failing test (with the real values), not the
+  source line of the assert that pytest also shows.
+- The symlink test accepts either refusal message. The probe file is copied from the host at run time, so the image did not
+  need a rebuild.
+
+Still not checked by hand: `--timeout` on a real container, and the cold start with Docker Desktop stopped.
 
 **Phase 3: (c).**
 9. Merge candidate with `merge-tree` and `commit-tree`; test in a temp worktree; fast-forward only on pass.
