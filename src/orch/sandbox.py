@@ -462,7 +462,7 @@ def _warm(spec: Spec, run_id: str, volume: str, warm_src: WarmSource, cancel: th
 def run_tests(
     target: ResolvedRepo, cfg: SandboxConfig, src: Path, command: list[str], run_id: str, *,
     warm_src: WarmSource | None = None, timeout_s: int = 600, cancel: threading.Event | None = None,
-    log: Callable[[str], None] = lambda m: None,
+    log: Callable[[str], None] = lambda m: None, extra_env: dict[str, str] | None = None,
 ) -> TestRun:  # fmt: skip
     """The one way tests run in the sandbox (the executor and `orch sandbox test` both come through here).
     `src` is mounted read-only; `command` comes from config.yaml. Never raises for a sandbox problem: that is a
@@ -478,7 +478,7 @@ def run_tests(
     except SandboxUnavailable as e:
         return _infra(str(e))
     spec = Spec.for_repo(target, cfg)
-    env = child_env(passthrough=target.env_passthrough)
+    env = {**child_env(passthrough=target.env_passthrough), **(extra_env or {})}  # extra_env: the docker CLI only, never `-e`
     try:
         volume = venv_volume_name(src, st.image_id)
         res = _run_once(spec, src, command, run_id, volume, env, target.env_passthrough, timeout_s, cancel)

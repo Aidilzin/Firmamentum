@@ -30,6 +30,7 @@ from .ui import make_view, render_doctor, render_plain, render_rich
 from . import doctor as doctor_mod
 from . import home as home_mod
 from . import sandbox as sandbox_mod
+from . import sandbox_manual as manual_mod
 from .sandbox import OFF_WARNING
 from .view import build_run_view, duration, fmt_elapsed
 from .plan import format_plan
@@ -715,6 +716,40 @@ def sandbox_check(
         raise typer.Exit(2)
     typer.echo("A test run would start (a real run mounts the run's worktree instead of the repo):")
     typer.echo(shlex.join(argv))
+
+
+@sandbox_app.command("test")
+def sandbox_test(
+    ctx: typer.Context,
+    repo: Optional[str] = typer.Option(None, "--repo", help="Configured repo name or a path. Default: cwd."),
+    src: Optional[Path] = typer.Option(None, "--src", help="Run on this folder instead of the repo (a scratch copy)."),
+    retest: bool = typer.Option(False, "--retest", help="Run retest_command instead of test_command."),
+    timeout: int = typer.Option(600, "--timeout", min=1, help="Seconds before the run is stopped."),
+    probe: bool = typer.Option(False, "--probe", help="Also plant three tests that try to escape; all must fail inside."),
+) -> None:
+    """Run the repo's tests in the sandbox by hand, through the same code a real run uses. No model call, no run folder."""
+    session = ctx.obj
+    cfg = _load_cfg(session, None)
+    target = _repo_or_exit(session, repo)
+    label = target.name or str(target.path)
+    typer.echo(f"repo {label}: tests in the sandbox, image {target.image}" + (" (escape probe on a scratch copy)" if probe else ""))
+    try:
+        res = manual_mod.run_manual(target, cfg.sandbox, src=src, retest=retest, timeout_s=timeout, probe=probe,
+                                    log=lambda m: typer.echo(m, err=True))  # fmt: skip
+    except manual_mod.ManualError as e:
+        typer.echo(f"Error: {e}", err=True)
+        raise typer.Exit(2)
+    except KeyboardInterrupt:
+        typer.echo("Stopped by you. The container of this test run was removed.", err=True)
+        raise typer.Exit(130)
+    if res.run.stdout:
+        typer.echo(res.run.stdout.rstrip("\n"))
+    if res.run.stderr.strip():
+        typer.echo(res.run.stderr.rstrip("\n"), err=True)
+    for kind, how in res.blocked:
+        typer.echo(f"  blocked ({kind}): {how}")
+    typer.echo(res.message, err=res.verdict in ("error", "cancelled"))
+    raise typer.Exit(res.exit_code)
 
 
 @app.command()

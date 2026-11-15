@@ -102,3 +102,95 @@ def test_a_broken_config_adds_no_docker_rows(tmp_path):
     eng = Engine()
     checks = doctor.run_checks(ctx_for(tmp_path, config_path=bad, docker=eng))
     assert not [c for c in checks if c.name.startswith(("docker", "sandbox"))] and eng.asked == []
+
+
+# ---------- containers left over from a run that is not running ----------
+
+from orch import runlock  # noqa: E402
+from orch.runs import create_run, write_meta  # noqa: E402
+
+
+def with_runs(tmp_path, statuses):
+    """Run folders in repo `demo` (path `repo`), by status. Returns {status: run id}."""
+    repo = tmp_path / "repo"
+    repo.mkdir(exist_ok=True)
+    ids = {}
+    for status in statuses:
+        d = create_run(repo, f"a {status} run")
+        write_meta(d, {"run_id": d.name, "status": status})
+        ids[status] = d.name
+    return ids
+
+
+def run_with_boxes(tmp_path, boxes, **over):
+    """doctor with a fake engine and `boxes` = [(id, run label, docker status)]."""
+    found = [sandbox.Container(*b) for b in boxes]
+    cfg = _cfg_file(tmp_path, repos={"demo": DOCKER_REPO})
+    return doctor.run_checks(ctx_for(tmp_path, config_path=cfg, docker=Engine(), containers=lambda: found, **over))
+
+
+def orphan_rows(checks):
+    return {n: c for n, c in by_name(checks).items() if n.startswith("sandbox containers")}
+
+
+def test_no_containers_no_rows(tmp_path):
+    assert orphan_rows(run_with_boxes(tmp_path, [])) == {}
+
+
+def test_a_container_of_a_finished_or_failed_run_is_a_warning_with_the_exact_fix(tmp_path):
+    ids = with_runs(tmp_path, ["done", "failed", "paused"])
+    boxes = [("aaaaaaaaaaaa", ids["done"], "Exited (0) 2 hours ago"), ("bbbbbbbbbbbb", ids["failed"], "Up 3 minutes"),
+             ("cccccccccccc", ids["failed"], "Exited (1) 1 hour ago"), ("dddddddddddd", ids["paused"], "Up 9 minutes")]  # fmt: skip
+    rows = orphan_rows(run_with_boxes(tmp_path, boxes))
+    assert len(rows) == 3
+    done = rows[f"sandbox containers {ids['done']}"]
+    assert done.level == doctor.WARN and "the run is done" in done.detail and done.fix == "if nothing is running: docker rm -f aaaaaaaaaaaa"
+    failed = rows[f"sandbox containers {ids['failed']}"]
+    assert "2 left over" in failed.detail and failed.fix.endswith("docker rm -f bbbbbbbbbbbb cccccccccccc")
+    assert "the run is paused" in rows[f"sandbox containers {ids['paused']}"].detail
+
+
+def test_an_unknown_run_is_a_warning(tmp_path):
+    rows = orphan_rows(run_with_boxes(tmp_path, [("eeeeeeeeeeee", "20200101T000000Z-gone", "Up 1 hour")]))
+    (row,) = rows.values()
+    assert row.level == doctor.WARN and "no run with this id" in row.detail
+
+
+def test_an_executing_run_with_no_process_is_stale_and_warns(tmp_path):
+    ids = with_runs(tmp_path, ["executing"])
+    (row,) = orphan_rows(run_with_boxes(tmp_path, [("ffffffffffff", ids["executing"], "Up 1 hour")])).values()
+    assert row.level == doctor.WARN and "died mid-step" in row.detail
+
+
+def test_an_executing_run_with_a_live_lock_is_not_a_warning(tmp_path):
+    ids = with_runs(tmp_path, ["executing"])
+    lock = runlock.acquire(tmp_path / "repo" / ".orch" / "runs" / ids["executing"])
+    try:
+        assert orphan_rows(run_with_boxes(tmp_path, [("ffffffffffff", ids["executing"], "Up 1 hour")])) == {}
+    finally:
+        lock.release()
+
+
+def test_a_manual_test_container_is_reported_with_the_note(tmp_path):
+    (row,) = orphan_rows(run_with_boxes(tmp_path, [("999999999999", "manual-ab12cd34", "Up 5 seconds")])).values()
+    assert row.level == doctor.WARN and "orch sandbox test" in row.detail and "may still be running" in row.detail
+    assert row.fix == "if nothing is running: docker rm -f 999999999999"
+
+
+def test_no_container_row_when_the_engine_is_down_or_cannot_list(tmp_path):
+    cfg = _cfg_file(tmp_path, repos={"demo": DOCKER_REPO})
+
+    def boom():
+        raise sandbox.SandboxError("cannot list")
+
+    assert orphan_rows(doctor.run_checks(ctx_for(tmp_path, config_path=cfg, docker=Engine(DOWN), containers=lambda: [
+        sandbox.Container("aaaaaaaaaaaa", "x", "Up")]))) == {}  # fmt: skip
+    assert orphan_rows(doctor.run_checks(ctx_for(tmp_path, config_path=cfg, docker=Engine(), containers=boom))) == {}
+
+
+def test_doctor_only_lists_it_never_removes(tmp_path, fake_docker):
+    fake_docker.plant("manual-ab12cd34")
+    cfg = _cfg_file(tmp_path, repos={"demo": DOCKER_REPO})
+    checks = doctor.run_checks(ctx_for(tmp_path, config_path=cfg, docker=Engine()))  # the real list_containers on the fake engine
+    assert len(orphan_rows(checks)) == 1
+    assert "rm" not in fake_docker.verbs() and len(fake_docker.boxes) == 1

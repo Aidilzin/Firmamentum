@@ -20,7 +20,8 @@ from typing import Callable, Mapping
 from . import budget, sandbox, versions, workspace
 from .adapters.claude_code import SCRUBBED_ENV
 from .adapters.process import child_env, run_process
-from .config import Config, ConfigError, load_config, default_config_path
+from .config import Config, ConfigError, load_config, default_config_path, resolve_repo
+from .runs import list_runs
 from .view import short_model
 
 OK, WARN, ERR = "ok", "warn", "err"
@@ -83,6 +84,7 @@ class Context:
     has_tzdata: Callable[[], bool] = lambda: importlib.util.find_spec("tzdata") is not None
     is_git_repo: Callable[[Path], bool] = lambda p: workspace.git(p, "rev-parse", "--git-dir", check=False).returncode == 0
     docker: Callable[[str], sandbox.ProbeResult] = lambda image: sandbox.docker_probe(image)  # always asks the engine
+    containers: Callable[[], list[sandbox.Container]] = lambda: sandbox.list_containers()
 
 
 def _writable(directory: Path) -> str | None:
@@ -267,9 +269,51 @@ def check_sandbox(ctx: Context, cfg: Config) -> list[Check]:
                 users = ", ".join(n for n, r in docker_repos.items() if (r.image or cfg.sandbox.image) == img)
                 out.append(Check(f"docker image {img}", ERR if users else WARN, f"not found; used by repo {users or '(none)'}",
                                  "build it: orch sandbox build"))  # fmt: skip
+    if engine is not None:
+        out += check_orphan_containers(ctx, cfg)
     for n in off_repos:
         out.append(Check(f"sandbox repo {n}", WARN, sandbox.OFF_WARNING,
                          f"agent-written tests run with your rights; remove `sandbox: off` from repos.{n} in config.yaml"))  # fmt: skip
+    return out
+
+
+def _live_runs(cfg: Config) -> dict[str, tuple[str, bool]]:
+    """run id -> (status, a process holds it) over every configured repo's runs."""
+    out: dict[str, tuple[str, bool]] = {}
+    for name in cfg.repos:
+        try:
+            for r in list_runs(resolve_repo(cfg, name).path):
+                out[r.run_id] = (r.status, r.status == "executing" and not r.stale)
+        except (ConfigError, OSError):
+            continue
+    return out
+
+
+def check_orphan_containers(ctx: Context, cfg: Config) -> list[Check]:
+    """One warning per run label that has sandbox containers but no live run behind it. Removes nothing: the fix is the
+    exact `docker rm -f` command. A label from `orch sandbox test` (`manual-...`) is reported too: a test may still run."""
+    try:
+        found = ctx.containers()
+    except sandbox.SandboxError:
+        return []  # the engine row already says the engine is not answering
+    by_label: dict[str, list[sandbox.Container]] = {}
+    for c in found:
+        by_label.setdefault(c.run, []).append(c)
+    runs = _live_runs(cfg) if any(not label.startswith("manual-") for label in by_label) else {}
+    out: list[Check] = []
+    for label, boxes in sorted(by_label.items()):
+        if label.startswith("manual-"):
+            why = "left by `orch sandbox test`; a test in another terminal may still be running"
+        elif label not in runs:
+            why = "no run with this id in the configured repos"
+        else:
+            status, live = runs[label]
+            if live:
+                continue  # a live run owns it
+            why = "the run died mid-step (status executing, no process holds it)" if status == "executing" else f"the run is {status}"
+        ids = " ".join(c.id for c in boxes)
+        out.append(Check(f"sandbox containers {label}", WARN, f"{len(boxes)} left over ({boxes[0].status}); {why}",
+                         f"if nothing is running: docker rm -f {ids}"))  # fmt: skip
     return out
 
 
