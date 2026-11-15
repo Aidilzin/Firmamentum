@@ -210,8 +210,7 @@ def _print_plan(r: services.PlanResult, *, summary: bool, details: bool = False)
 
 
 def _repo_or_exit(session: Session, repo_arg):
-    session.config  # a config that cannot be loaded propagates from here, as load_config() did before the Session
-    try:
+    try:  # a config that cannot be loaded is reported here too (session.repo reads session.config)
         return session.repo(repo_arg)
     except ConfigError as e:
         typer.echo(f"Error: {e}", err=True)

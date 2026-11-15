@@ -281,6 +281,27 @@ def test_plan_bad_config_and_bad_model(g, tmp_path, monkeypatch):
     assert fb.requests == []
 
 
+def _break_config(tmp_path, monkeypatch):
+    bad = tmp_path / "broken.yaml"
+    bad.write_text("not: [valid", encoding="utf-8")
+    monkeypatch.setenv("ORCH_CONFIG", str(bad))
+
+
+def test_runs_and_status_with_a_broken_config_print_the_error_and_exit_2(g, tmp_path, monkeypatch):
+    """P6 follow-up: these used to raise an unhandled ConfigError (a traceback); now they print `Error:` and exit 2."""
+    _break_config(tmp_path, monkeypatch)
+    g[3]("runs_bad_config", invoke(["runs"]))
+    g[3]("status_bad_config", invoke(["status", "r1", "--repo", "demo"]))
+
+
+@pytest.mark.parametrize("args", [["runs"], ["show", "r1"], ["merge", "r1"], ["status", "r1"], ["diff", "r1"], ["clean", "r1"]])
+def test_every_repo_command_reports_a_broken_config_the_same_way(g, tmp_path, monkeypatch, args):
+    _break_config(tmp_path, monkeypatch)
+    r = invoke(args)
+    assert r.exit_code == 2 and "Traceback" not in r.output
+    assert r.stderr.startswith("Error: invalid YAML in ") and "broken.yaml" in r.stderr
+
+
 def test_run_plans_and_executes_to_done(g, monkeypatch):
     fb = fakes(monkeypatch, [planner(ONE), edit({"src/s1.py": "a = 1\n"})])
     g[3]("run_done", invoke(["run", "do it", "--repo", "demo"]))
