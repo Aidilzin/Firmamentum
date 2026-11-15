@@ -113,7 +113,8 @@ def test_a_dependency_file_that_is_a_symlink_is_refused(run, tmp_path):
         (wt.path / "uv.lock").symlink_to(tmp_path / "elsewhere")
     except OSError:
         pytest.skip("symlinks need a privilege on this machine")
-    with pytest.raises(SandboxError, match="not a regular file"):
+    # either refusal is right: the link points outside the project, or it is not a regular file
+    with pytest.raises(SandboxError, match="outside the project|not a regular file"):
         with warm(approved={"uv.lock"}):
             pass
 

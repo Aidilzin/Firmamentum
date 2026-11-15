@@ -39,6 +39,19 @@ class ManualResult:
         return {"pass": 0, "failed": 1, "error": 2, "cancelled": 130}[self.verdict]
 
 
+_FAILURE_LINE = re.compile(r"^E\s+(?:AssertionError|Failed|[A-Za-z]*Error): (ESCAPED: .*)$", re.MULTILINE)
+
+
+def _escape_message(output: str) -> str:
+    """The message of the failing probe test. pytest shows the source line of the assert too (it contains the same words),
+    so the `E   AssertionError: ...` line, which holds the real values, wins over any other line."""
+    text = output.replace("\r", "")
+    m = _FAILURE_LINE.search(text)
+    if m:
+        return m.group(1).strip()
+    return next((ln.strip() for ln in text.splitlines() if ln.strip().startswith("ESCAPED:")), "")
+
+
 def probe_file() -> Path:
     return sandbox.dockerfile_dir() / "probe" / "probe_escape.py"
 
@@ -110,7 +123,7 @@ def run_manual(
         return ManualResult(verdict, res, message)  # type: ignore[arg-type]
     seen = [(m.group(1), m.group(2).strip()) for m in _BLOCKED.finditer(res.stdout.replace("\r", ""))]
     if verdict == "failed":
-        escaped = next((ln.strip() for ln in res.stdout.splitlines() if "ESCAPED:" in ln), "")
+        escaped = _escape_message(res.stdout)
         message = "PROBE FAILED: " + (escaped or message + "; a real test failed or an escape attempt got through")
     if verdict != "pass":
         return ManualResult(verdict, res, message, seen)  # type: ignore[arg-type]

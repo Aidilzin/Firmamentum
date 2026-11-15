@@ -49,7 +49,15 @@ def test_cannot_open_a_socket():
 def test_host_environment_and_drives_are_not_visible():
     names = ("ORCH_PROBE_CANARY", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ANTHROPIC_API_KEY")
     leaked = [n for n in names if n in os.environ]
-    drives = [p for p in ("/c", "/mnt", "/host_mnt") if os.path.exists(p)]
+    # /mnt exists, empty, in the base image, so existing is fine. A host drive would be a mount point or hold something.
+    candidates = ("/c", "/mnt", "/mnt/c", "/mnt/host", "/host_mnt", "/host_mnt/c")
+    drives = []
+    for p in candidates:
+        if not os.path.lexists(p):
+            continue
+        if os.path.islink(p) or os.path.ismount(p) or not os.path.isdir(p) or os.listdir(p):
+            drives.append(p)
     assert not leaked, f"ESCAPED: host environment variables visible: {leaked}"
-    assert not drives, f"ESCAPED: host drives visible: {drives}"
-    print("BLOCKED: host env: " + ", ".join(names) + " are not set, and no host drive is mounted")
+    assert not drives, f"ESCAPED: host drives visible (mounted, linked or not empty): {drives}"
+    print("BLOCKED: host env: " + ", ".join(names) + " are not set, and none of " + ", ".join(candidates)
+          + " is a mount, a link or holds anything")

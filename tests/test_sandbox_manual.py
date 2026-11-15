@@ -159,6 +159,32 @@ def test_probe_fails_when_an_attempt_is_not_reported_blocked(probe_repo, fake_do
     assert r.exit_code == 1 and "PROBE FAILED" in r.output and "host env" in r.output
 
 
+PYTEST_FAILURE = """\
+    def test_host_environment_and_drives_are_not_visible():
+        leaked = []
+>       assert not drives, f"ESCAPED: host drives visible: {drives}"
+E       AssertionError: ESCAPED: host drives visible (mounted, linked or not empty): ['/mnt/c']
+E       assert not ['/mnt/c']
+
+tests/test_escape_probe.py:54: AssertionError
+"""
+
+
+def test_probe_failed_shows_the_real_assertion_not_the_source_line(probe_repo, fake_docker):
+    _, configure = probe_repo
+    configure("write", "network", "host env")
+
+    def escaped(sim, box, argv):
+        exits(1)(sim, box, argv)
+        return ProcessOutput(stdout=PYTEST_FAILURE, returncode=1)
+
+    fake_docker.script = [escaped]
+    r = invoke("sandbox", "test", "--repo", "demo", "--probe")
+    assert r.exit_code == 1
+    assert "PROBE FAILED: ESCAPED: host drives visible (mounted, linked or not empty): ['/mnt/c']" in r.output
+    assert 'f"ESCAPED' not in r.output.split("PROBE FAILED")[1]
+
+
 def test_probe_fails_when_an_escape_gets_through(probe_repo, fake_docker):
     _, configure = probe_repo
     configure("write", "network", "host env")
@@ -200,6 +226,7 @@ def test_the_probe_file_refuses_to_run_outside_a_container_and_has_the_three_att
     src = ast.unparse(tree)
     assert "1.1.1.1" in src and "ORCH_PROBE_CANARY" in src and "USERPROFILE" in src and "/src/orch-probe.txt" in src
     assert src.count("BLOCKED: ") == 3
+    assert "os.path.ismount" in src and "os.listdir" in src and "'/mnt/c'" in src and "'/mnt/host'" in src
 
 
 def test_the_probe_folder_is_not_collected_by_the_normal_suite():
