@@ -398,6 +398,8 @@ A crashed run stays `executing` with a `running` step forever. `orch runs`, the 
 
 Config is re-read from a path relative to the source tree on every command, the theme is a module global, the default repo is the process cwd, and model overrides are per invocation. A long-lived shell needs these in one `Session` object (repo, run, theme, overrides, loaded config with reload), passed down rather than looked up.
 
+**Status:** fixed in P6 (15 Nov 2026), `src/orch/session.py`. Two differences from the sketch above: the run id and run handle stay in 6b's `ShellSession`, which wraps the `Session`; and a worker thread receives a `RunContext` snapshot, never the `Session`. One-shot output is unchanged (76 goldens plus one new one for a bad config together with a bad `--model`).
+
 ---
 
 ## Low
