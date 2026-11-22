@@ -316,3 +316,31 @@ def test_sweep_is_called_on_the_run_label_after_each_agent_call(env, fake_docker
     ex, _ = executor(run_dir, rr, [edit({"src/s1.py": "a = 1\n"})])
     ex.start()
     assert swept.count(run_dir.name) >= 2  # after the agent call, and after each sandboxed run
+
+
+# ---------- prompts and role text ----------
+
+
+def test_role_text_no_longer_promises_extra_arguments():
+    from orch.executor import builder_instructions, repair_instructions
+
+    for text in (builder_instructions(), repair_instructions()):
+        assert "may be appended" not in text and "no extra arguments" in text
+
+
+def test_repair_prompt_names_orch_test_adds_the_note_and_drops_the_retest_when_sandboxed(env, fake_docker):
+    from orch.executor import SANDBOX_NOTE, repair_prompt
+
+    _, setup, _ = env
+    run_dir, _ = one_step(setup)
+    from orch.plan import Plan
+    from orch.runs import load_plan
+
+    plan = load_plan(run_dir)
+    step = plan.steps[0]
+    ctx = {"reasons": ["tests"], "issues": []}
+    on = repair_prompt(plan, step, ctx, "tail", Path("/in"), "orch-test", "uv run pytest --lf -q", sandboxed=True)
+    assert "Full test command (must pass): orch-test" in on and SANDBOX_NOTE in on and "Quick re-test" not in on
+    off = repair_prompt(plan, step, ctx, "tail", Path("/in"), "uv run pytest -q", "uv run pytest --lf -q")
+    assert "Quick re-test first: uv run pytest --lf -q" in off and "orch-test" not in off
+    assert isinstance(plan, Plan)

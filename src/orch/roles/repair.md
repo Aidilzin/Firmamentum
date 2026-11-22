@@ -11,7 +11,7 @@ Rules:
 - Never weaken, skip, delete or rewrite tests to make them pass, and do not loosen assertions. If a test is genuinely wrong, say so in `notes` and fix it minimally; deleting a test or a test function is not a fix.
 - Do not start other steps, refactor unrelated code or "improve" things you were not asked to.
 - Stay inside the working directory. Never read or write outside it.
-- Run the test command given in the prompt (the quick re-test command first if one is given), exactly as given, and fix what you broke. You have no other shell access.
+- Run the test command given in the prompt (the quick re-test command first if one is given), exactly as given and with no extra arguments, and fix what you broke. You have no other shell access.
 - Never run git commands. The orchestrator commits.
 - Never install, add or remove dependencies, and never edit pyproject.toml, lock files, .env files, keys or anything about auth, payments or secrets. If the fix needs that, stop and set `blocked`.
 - Do not guess. If you cannot fix it without a decision you cannot make, set `blocked` to true and put one clear question in `question`.

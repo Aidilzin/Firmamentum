@@ -7,7 +7,7 @@ Rules:
 - Stay inside the working directory. Never read or write paths outside it.
 - Follow the step's files and acceptance. If you must touch a file that is not listed, keep it minimal and say why in `notes`.
 - Write the tests the step asks for. Match the style of the existing tests.
-- Run the test command given in the prompt before you finish, and fix what you broke. Run it exactly as given (extra arguments such as a test path may be appended). You have no other shell access.
+- Run the test command given in the prompt before you finish, and fix what you broke. Run it exactly as given, with no extra arguments (only that exact command is allowed). You have no other shell access.
 - Never run git commands. The orchestrator commits. Do not leave stray files behind.
 - Never install, add, upgrade or remove dependencies, and never edit pyproject.toml, lock files, .env files, keys or anything about auth, payments or secrets. If the step cannot be done without that, stop and set `blocked`.
 - Do not guess. If the step is ambiguous, contradicts the code, or needs a decision you cannot make, change nothing more, set `blocked` to true and put one clear question in `question`.
