@@ -421,8 +421,9 @@ Not checked by hand: the cold-venv warm container for a merge (the venv volume a
 warm ran; it is covered by the fake tests only), a second Ctrl-C press, `--timeout` on a real container, and the `sandbox: off`
 path on a real repo.
 
-**Phase 4: (a). Code and fake tests done 22 Nov 2026** (six commits, `Sandbox Phase 4, 1/6` to `6/6`). The five free hand checks
-and the one real model check are below and are **not yet recorded**.
+**Phase 4: (a). Done 22 Nov 2026** (six commits, `Sandbox Phase 4, 1/6` to `6/6`, then a docs commit). Fake tests in the
+commits; the five hand checks and the one real model check passed and are in "Phase 4 results" below and in
+`docs/probe-results.md`.
 10. Shim writer and `PATH` handling; tests assert the shim lives outside the worktree and the folders the agent can reach.
 11. `builder_args` and `repair_args` use `Bash(orch-test)`; prompt text updated.
 12. **The one real check** (one `--model sonnet` call, about 10k to 20k tokens): in a scratch worktree of `practice`,
@@ -470,6 +471,26 @@ The real check (exactly one `--model sonnet` call, scratch clone of `practice` w
 orch folder, the probe planted as a test, prompt "Run orch-test and reply with its last line."): pass means the reply is the
 `N passed` line, `permission_denials` is empty, `calls.jsonl` shows one `ran` with exit 0, the canary is unchanged, nothing new
 on the host, and no container is left. Any unexpected result stops the check; no second call without your OK.
+
+### Phase 4 results (22 Nov 2026)
+
+Docker Desktop 29.9.3, image `orch-sbx:py312`, `claude` 2.1.322, scratch clone of `practice` (origin removed), real Git Bash.
+
+| # | Check | Result |
+| --- | --- | --- |
+| 1 | `orch-test` from Git Bash with the shim's PATH | Found through PATH; 8 passed, exit 0 (4.0 s). A planted failing test gave pytest's output and exit 1. |
+| 2 | `orch-test -k x` | "takes no arguments", exit 2. |
+| 3 | `uv.lock` edited | The dependency message, exit 75; `calls.jsonl` recorded it as `infra/96`. |
+| 4 | Runner killed mid-test, then the sweep | The container outlived the kill by 5 s (so the sweep is needed); the sweep removed it, none left. |
+| 5 | `orch sandbox test --repo practice --probe` | Four `blocked` lines, `PROBE OK`. |
+| real | One `--model sonnet` call: "Run orch-test and reply with its last line." | Reply `12 passed in 0.03s`; `permission_denials` `[]`; `calls.jsonl` one `ran`/0; host canary sha256 unchanged; no `orch-canary*`/`orch-probe*` file on the host; worktree status only the two planted files; no container left. |
+
+- The shim was found through PATH; the absolute-path fallback was not needed.
+- Claude Code ran it in the foreground (one `Bash` call, no `run_in_background`, output in the tool result). The call lasted
+  2.5 s, so a run that approaches the 30-minute background default is still unobserved.
+- The real check used `--output-format stream-json --verbose` to see the tool calls; the permission flags were the ones orch
+  builds. About 15.7k tokens of plan quota.
+- Not checked by hand: a real Ctrl-C reaching the runner's own `finally`, the cold-warm path, and a long `orch-test` run.
 
 **Phase 5, optional: box the agent process too.** Only if you want defence against a `--restricted` regression. It means
 a second Pro login inside the box, sitting next to whatever the agent runs there, and an egress allow-list. One thing to
