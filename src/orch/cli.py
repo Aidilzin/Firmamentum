@@ -751,7 +751,7 @@ def sandbox_test(
     src: Optional[Path] = typer.Option(None, "--src", help="Run on this folder instead of the repo (a scratch copy)."),
     retest: bool = typer.Option(False, "--retest", help="Run retest_command instead of test_command."),
     timeout: int = typer.Option(600, "--timeout", min=1, help="Seconds before the run is stopped."),
-    probe: bool = typer.Option(False, "--probe", help="Also plant three tests that try to escape; all must fail inside."),
+    probe: bool = typer.Option(False, "--probe", help="Also plant four tests that try to escape; all must fail inside."),
 ) -> None:
     """Run the repo's tests in the sandbox by hand, through the same code a real run uses. No model call, no run folder."""
     session = ctx.obj

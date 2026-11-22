@@ -1,11 +1,12 @@
 """`orch sandbox test`: run a repo's tests by hand through exactly the path a real run uses (sandbox.run_tests).
 
-No model call, no worktree, no run folder. `--probe` plants three tests that try to escape and checks that all three fail
+No model call, no worktree, no run folder. `--probe` plants four tests that try to escape and checks that all four fail
 inside while the repo's real tests pass.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import secrets
 import shlex
@@ -19,8 +20,10 @@ from typing import Callable, Iterator, Literal
 from . import sandbox, workspace
 from .config import ResolvedRepo, SandboxConfig
 
-PROBE_KINDS = ("write", "network", "host env")
-_BLOCKED = re.compile(r"^BLOCKED: (write|network|host env): (.*)$", re.MULTILINE)
+PROBE_KINDS = ("write", "network", "host env", "host file")
+_BLOCKED = re.compile(r"^BLOCKED: (write|network|host env|host file): (.*)$", re.MULTILINE)
+# Where Docker Desktop's file sharing could show a Windows drive inside a Linux container (the drive letter is lower case).
+DRIVE_BASES = ("/mnt", "/host_mnt", "/run/desktop/mnt/host", "/mnt/host", "")
 
 
 class ManualError(Exception):
@@ -50,6 +53,17 @@ def _escape_message(output: str) -> str:
     if m:
         return m.group(1).strip()
     return next((ln.strip() for ln in text.splitlines() if ln.strip().startswith("ESCAPED:")), "")
+
+
+def host_variants(path: Path) -> list[str]:
+    """Every way the container might spell `path`: as written, with forward slashes, and under each drive mount."""
+    text = str(path)
+    out = [text, text.replace("\\", "/")]
+    m = re.match(r"^([A-Za-z]):[\\/](.*)$", text)
+    if m:
+        drive, rest = m.group(1).lower(), m.group(2).replace("\\", "/")
+        out += [f"{base}/{drive}/{rest}" for base in DRIVE_BASES]
+    return list(dict.fromkeys(out))
 
 
 def probe_file() -> Path:
@@ -100,6 +114,7 @@ def run_manual(
     token = secrets.token_hex(4)
     extra_env: dict[str, str] = {}
     scratch: Path | None = None
+    canary: Path | None = None
     try:
         if probe:
             scratch = workspace.warm_root() / f"probe-{token}"
@@ -110,6 +125,9 @@ def run_manual(
             (scratch / "tests").mkdir(exist_ok=True)
             shutil.copyfile(probe_file(), scratch / "tests" / "test_escape_probe.py")
             folder = scratch
+            canary = workspace.warm_root() / f"probe-{token}.canary"  # a real host file, outside everything mounted
+            canary.write_text(f"canary-{token}", encoding="utf-8")
+            (scratch / "probe_target.json").write_text(json.dumps({"paths": host_variants(canary)}), encoding="utf-8")
             extra_env["ORCH_PROBE_CANARY"] = f"canary-{token}"  # in the docker CLI's environment only, never in the argv
             if "pytest" in command:
                 command = [*command, "-rP"]  # show what the passing probe tests printed
@@ -118,6 +136,8 @@ def run_manual(
     finally:
         if scratch is not None:
             shutil.rmtree(scratch, ignore_errors=True)
+        if canary is not None:
+            canary.unlink(missing_ok=True)
     verdict, message = _verdict(res)
     if not probe:
         return ManualResult(verdict, res, message)  # type: ignore[arg-type]
@@ -130,4 +150,4 @@ def run_manual(
     missing = [k for k in PROBE_KINDS if k not in {kind for kind, _ in seen}]
     if missing:
         return ManualResult("failed", res, "PROBE FAILED: tests passed but no BLOCKED line for " + ", ".join(missing), seen)
-    return ManualResult("pass", res, "PROBE OK: the real tests pass and all three escape attempts were blocked", seen)
+    return ManualResult("pass", res, "PROBE OK: the real tests pass and all four escape attempts were blocked", seen)

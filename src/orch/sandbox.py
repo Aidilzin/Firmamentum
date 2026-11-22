@@ -275,6 +275,27 @@ def sweep(run_id: str, log: Callable[[str], None] = lambda m: None) -> list[str]
     return ids
 
 
+def sweep_names(names: list[str], log: Callable[[str], None] = lambda m: None) -> list[str]:
+    """Force-remove the containers with exactly these names (the ones one `run_tests` call started), and nothing else of
+    the run: a sibling call of the same run keeps its container. Never raises; a failure is logged with the command."""
+    removed: list[str] = []
+    for name in names:
+        _check(name, _VOLUME, "container name")
+        ps = docker_call(["docker", "ps", "-aq", "--filter", f"name={name}"])
+        if not _ok(ps):
+            log(f"warning: could not look for sandbox container {name} ({_why(ps)}); check by hand: docker ps -a --filter name={name}")
+            continue
+        ids = [i for i in ps.stdout.split() if _CONTAINER_ID.fullmatch(i)]
+        if not ids:
+            continue
+        rm = docker_call(["docker", "rm", "-f", *ids])
+        if not _ok(rm):
+            log(f"warning: could not remove sandbox container {name} ({_why(rm)}); remove by hand: docker rm -f {' '.join(ids)}")
+            continue
+        removed += ids
+    return removed
+
+
 @dataclass(frozen=True)
 class Container:
     id: str
@@ -435,8 +456,11 @@ def classify(out: ProcessOutput, name: str, memory: str) -> TestRun:
 
 
 def _run_once(spec: Spec, src: Path, command: list[str], run_id: str, volume: str, env: dict[str, str],
-              passthrough: tuple[str, ...] | list[str], timeout_s: int, cancel: threading.Event | None) -> TestRun:  # fmt: skip
+              passthrough: tuple[str, ...] | list[str], timeout_s: int, cancel: threading.Event | None,
+              started: list[str] | None = None) -> TestRun:  # fmt: skip
     name = container_name(run_id)
+    if started is not None:
+        started.append(name)
     argv = test_argv(spec, src, command, run_id, volume, passthrough, name=name)
     out = docker_run(argv, inner=command, src=src, env=env, timeout_s=timeout_s, cancel=cancel)
     if out.cancelled:
@@ -447,13 +471,15 @@ def _run_once(spec: Spec, src: Path, command: list[str], run_id: str, volume: st
 
 
 def _warm(spec: Spec, run_id: str, volume: str, warm_src: WarmSource, cancel: threading.Event | None,
-          log: Callable[[str], None]) -> TestRun | None:  # fmt: skip
+          log: Callable[[str], None], started: list[str] | None = None) -> TestRun | None:  # fmt: skip
     """Prepare the venv volume: the one container with network. Returns None when it worked, else why not.
     `warm_src` hands out a folder holding trusted content only (the run's base commit plus approved dependency files);
     it raises SandboxError when it cannot, for example for a dependency change you have not approved."""
     log("preparing the test environment (network is on for this one container; it runs once per dependency change)")
     with warm_src() as src:
         name = container_name(run_id)
+        if started is not None:
+            started.append(name)
         argv = warm_argv(spec, src, run_id, volume, name=name)
         out = docker_run(argv, inner=WARM_COMMAND, src=src, env=child_env(), timeout_s=WARM_TIMEOUT_S, cancel=cancel)
     if out.cancelled:
@@ -472,11 +498,12 @@ def _warm(spec: Spec, run_id: str, volume: str, warm_src: WarmSource, cancel: th
 def run_tests(
     target: ResolvedRepo, cfg: SandboxConfig, src: Path, command: list[str], run_id: str, *,
     warm_src: WarmSource | None = None, timeout_s: int = 600, cancel: threading.Event | None = None,
-    log: Callable[[str], None] = lambda m: None, extra_env: dict[str, str] | None = None,
+    log: Callable[[str], None] = lambda m: None, extra_env: dict[str, str] | None = None, own_only: bool = False,
 ) -> TestRun:  # fmt: skip
     """The one way tests run in the sandbox (the executor and `orch sandbox test` both come through here).
     `src` is mounted read-only; `command` comes from config.yaml. Never raises for a sandbox problem: that is a
-    `TestRun(kind="infra")`. Containers of `run_id` are removed on every way out, Ctrl-C included."""
+    `TestRun(kind="infra")`. Containers are removed on every way out, Ctrl-C included: every container of `run_id`, or with
+    `own_only` only the ones this call started (the agent's `orch-test` may run next to another call of the same run)."""
     if target.sandbox == "off":
         raise SandboxError("run_tests called for a repo with sandbox: off")
     try:
@@ -489,16 +516,17 @@ def run_tests(
         return _infra(str(e))
     spec = Spec.for_repo(target, cfg)
     env = {**child_env(passthrough=target.env_passthrough), **(extra_env or {})}  # extra_env: the docker CLI only, never `-e`
+    started: list[str] = []
     try:
         volume = venv_volume_name(src, st.image_id)
-        res = _run_once(spec, src, command, run_id, volume, env, target.env_passthrough, timeout_s, cancel)
+        res = _run_once(spec, src, command, run_id, volume, env, target.env_passthrough, timeout_s, cancel, started)
         if res.kind == "ran" and res.exit_code == EXIT_VENV_NOT_READY:
             if warm_src is None:
                 return TestRun("infra", res.exit_code, res.stdout, res.stderr,
                                "the test environment (venv volume) is not prepared and there is no source to prepare it from")  # fmt: skip
-            if (failed := _warm(spec, run_id, volume, warm_src, cancel, log)) is not None:
+            if (failed := _warm(spec, run_id, volume, warm_src, cancel, log, started)) is not None:
                 return failed
-            res = _run_once(spec, src, command, run_id, volume, env, target.env_passthrough, timeout_s, cancel)
+            res = _run_once(spec, src, command, run_id, volume, env, target.env_passthrough, timeout_s, cancel, started)
             if res.kind == "ran" and res.exit_code == EXIT_VENV_NOT_READY:  # warmed, and still not ready: do not loop
                 return TestRun("infra", res.exit_code, res.stdout, res.stderr,
                                "the test environment is still not ready after it was prepared")  # fmt: skip
@@ -506,4 +534,8 @@ def run_tests(
     except SandboxError as e:
         return _infra(str(e))
     finally:
-        sweep(run_id, log)  # a cancelled docker CLI leaves its container running; this stops and removes it
+        # a cancelled docker CLI leaves its container running; this stops and removes it
+        if own_only:
+            sweep_names(started, log)
+        else:
+            sweep(run_id, log)

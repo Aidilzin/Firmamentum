@@ -138,7 +138,7 @@ def probe_repo(tmp_path, monkeypatch):
 
 def test_probe_ok_plants_the_tests_sets_the_canary_outside_the_argv_and_cleans_up(probe_repo, fake_docker):
     repo, configure = probe_repo
-    configure("write", "network", "host env")
+    configure("write", "network", "host env", "host file")
     r = invoke("sandbox", "test", "--repo", "demo", "--probe")
     assert r.exit_code == 0, r.output
     assert "PROBE OK" in r.output and "blocked (network)" in r.output
@@ -154,9 +154,9 @@ def test_probe_ok_plants_the_tests_sets_the_canary_outside_the_argv_and_cleans_u
 
 def test_probe_fails_when_an_attempt_is_not_reported_blocked(probe_repo, fake_docker):
     _, configure = probe_repo
-    configure("write", "network")
+    configure("write", "network", "host env")
     r = invoke("sandbox", "test", "--repo", "demo", "--probe")
-    assert r.exit_code == 1 and "PROBE FAILED" in r.output and "host env" in r.output
+    assert r.exit_code == 1 and "PROBE FAILED" in r.output and "host file" in r.output
 
 
 PYTEST_FAILURE = """\
@@ -172,7 +172,7 @@ tests/test_escape_probe.py:54: AssertionError
 
 def test_probe_failed_shows_the_real_assertion_not_the_source_line(probe_repo, fake_docker):
     _, configure = probe_repo
-    configure("write", "network", "host env")
+    configure("write", "network", "host env", "host file")
 
     def escaped(sim, box, argv):
         exits(1)(sim, box, argv)
@@ -187,7 +187,7 @@ def test_probe_failed_shows_the_real_assertion_not_the_source_line(probe_repo, f
 
 def test_probe_fails_when_an_escape_gets_through(probe_repo, fake_docker):
     _, configure = probe_repo
-    configure("write", "network", "host env")
+    configure("write", "network", "host env", "host file")
     fake_docker.script = [
         lambda sim, box, argv: exits(1)(sim, box, argv).__class__(
             stdout="ESCAPED: connected to 1.1.1.1:53\nBLOCKED: write: x\n", returncode=1)
@@ -213,11 +213,11 @@ def test_probe_appends_the_report_flag_only_for_pytest(probe_repo, tmp_path, mon
 # ---------- the planted file itself ----------
 
 
-def test_the_probe_file_refuses_to_run_outside_a_container_and_has_the_three_attempts():
+def test_the_probe_file_refuses_to_run_outside_a_container_and_has_the_four_attempts():
     tree = ast.parse(sandbox.dockerfile_dir().joinpath("probe", "probe_escape.py").read_text(encoding="utf-8"))
     funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
     assert sorted(n for n in funcs if n.startswith("test_")) == [
-        "test_cannot_open_a_socket", "test_cannot_write_outside_the_working_copy",
+        "test_a_host_file_cannot_be_read", "test_cannot_open_a_socket", "test_cannot_write_outside_the_working_copy",
         "test_host_environment_and_drives_are_not_visible",
     ]  # fmt: skip
     guard = funcs["only_inside_a_container"]
@@ -225,7 +225,8 @@ def test_the_probe_file_refuses_to_run_outside_a_container_and_has_the_three_att
     assert "autouse=True" in text and "/.dockerenv" in text and "pytest.fail" in text
     src = ast.unparse(tree)
     assert "1.1.1.1" in src and "ORCH_PROBE_CANARY" in src and "USERPROFILE" in src and "/src/orch-probe.txt" in src
-    assert src.count("BLOCKED: ") == 3
+    assert src.count("BLOCKED: ") == 4
+    assert "probe_target.json" in src
     assert "os.path.ismount" in src and "os.listdir" in src and "'/mnt/c'" in src and "'/mnt/host'" in src
 
 
@@ -234,3 +235,43 @@ def test_the_probe_folder_is_not_collected_by_the_normal_suite():
     assert not list((root / "sandbox").rglob("test_*.py")) and not list((root / "sandbox").rglob("*_test.py"))
     assert (root / "sandbox" / "probe" / "probe_escape.py").is_file()
 
+
+
+def test_host_variants_lists_every_spelling_a_container_could_use_for_a_windows_file():
+    from pathlib import PureWindowsPath
+
+    from orch.sandbox_manual import host_variants
+
+    bs = chr(92)
+    raw = bs.join(["C:", "Users", "me", "AppData", "Local", "orch", "warm", "probe-1.canary"])
+    got = host_variants(PureWindowsPath(raw))
+    assert raw in got
+    for base in ("/mnt", "/host_mnt", "/run/desktop/mnt/host", "/mnt/host", ""):
+        assert f"{base}/c/Users/me/AppData/Local/orch/warm/probe-1.canary" in got
+    assert len(got) == len(set(got))
+    assert host_variants(PureWindowsPath("/tmp/x")) == [bs + "tmp" + bs + "x", "/tmp/x"]  # not a drive path
+
+
+def test_probe_plants_a_real_host_canary_outside_the_mount_and_removes_it(probe_repo, fake_docker):
+    import json as _json
+
+    _, configure = probe_repo
+    configure("write", "network", "host env", "host file")
+    seen = {}
+
+    def look(sim, box, argv):
+        src = sim.runs[-1]["src"]
+        seen["paths"] = _json.loads((src / "probe_target.json").read_text(encoding="utf-8"))["paths"]
+        files = [p for p in workspace.warm_root().iterdir() if p.suffix == ".canary"]
+        seen["canary"] = [str(p) for p in files]
+        seen["text"] = [p.read_text(encoding="utf-8") for p in files]
+        exits(0)(sim, box, argv)
+        lines = "".join(f"BLOCKED: {k}: x" + chr(10) for k in ("write", "network", "host env", "host file"))
+        return ProcessOutput(stdout=lines, returncode=0)
+
+    fake_docker.script = [look]
+    r = invoke("sandbox", "test", "--repo", "demo", "--probe")
+    assert r.exit_code == 0, r.output
+    assert len(seen["canary"]) == 1 and seen["text"][0].startswith("canary-")
+    assert seen["canary"][0] in seen["paths"]
+    assert not list(workspace.warm_root().iterdir())  # canary and scratch are gone

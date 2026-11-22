@@ -227,6 +227,59 @@ def test_a_failing_sweep_warns_and_the_result_stands(tmp_path, fake_docker):
     assert any("docker rm -f" in m for m in logs)
 
 
+# ---------- own_only: the agent's orch-test next to another call of the same run ----------
+
+
+def test_own_only_leaves_a_sibling_container_of_the_same_run_alone(tmp_path, fake_docker):
+    sibling = fake_docker.plant("run-1", "running")  # same run label, started by another orch-test call
+    res = go(tmp_path, own_only=True)
+    assert res.kind == "ran"
+    assert list(fake_docker.boxes) == [sibling.name]  # its own container is gone, the sibling is not
+
+
+def test_the_default_still_sweeps_the_whole_run_label(tmp_path, fake_docker):
+    fake_docker.plant("run-1", "running")
+    go(tmp_path)
+    assert fake_docker.boxes == {}
+
+
+def test_own_only_removes_its_container_after_cancel_timeout_and_ctrl_c(tmp_path, fake_docker):
+    keep = fake_docker.plant("run-1", "running")
+    ev = threading.Event()
+    ev.set()
+    ev2 = threading.Event()
+
+    def cancel_midway(sim, box, argv):
+        ev2.set()
+        return ProcessOutput(returncode=None, cancelled=True)
+
+    fake_docker.script = [cancel_midway]
+    res = go(tmp_path, own_only=True, cancel=ev2)
+    assert res.kind == "cancelled" and list(fake_docker.boxes) == [keep.name]
+    fake_docker.script = [lambda sim, box, argv: ProcessOutput(timed_out=True)]
+    assert go(tmp_path, own_only=True).kind == "timed_out" and list(fake_docker.boxes) == [keep.name]
+
+    def boom(sim, box, argv):
+        raise KeyboardInterrupt
+
+    fake_docker.script = [boom]
+    with pytest.raises(KeyboardInterrupt):
+        go(tmp_path, own_only=True)
+    assert list(fake_docker.boxes) == [keep.name]
+
+
+def test_own_only_also_removes_the_warm_container(tmp_path, fake_docker):
+    keep = fake_docker.plant("run-1", "running")
+    fake_docker.script = [exits(96), exits(0), exits(0)]
+    res = go(tmp_path, own_only=True, warm_src=lambda: _folder(tmp_path))
+    assert res.kind == "ran" and list(fake_docker.boxes) == [keep.name]
+
+
+@contextmanager
+def _folder(path):
+    yield path
+
+
 # ---------- the warm step ----------
 
 

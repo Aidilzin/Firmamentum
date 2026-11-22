@@ -84,10 +84,14 @@ class DockerSim:
         if verb in self.fail:
             return self.fail[verb]
         if verb == "ps":
-            label = (_after(argv, "--filter") or "").removeprefix("label=")
+            flt = _after(argv, "--filter") or ""
             want_all = any(a in ("-a", "-aq") for a in argv)
-            hits = [b for b in self.boxes.values() if (want_all or b.status == "running")
-                    and (b.label == label.removeprefix("orch.run=") if "=" in label else True)]  # fmt: skip
+            if flt.startswith("name="):  # substring match, like the engine
+                pick = lambda b: flt.removeprefix("name=") in b.name  # noqa: E731
+            else:
+                label = flt.removeprefix("label=")
+                pick = lambda b: b.label == label.removeprefix("orch.run=") if "=" in label else True  # noqa: E731
+            hits = [b for b in self.boxes.values() if (want_all or b.status == "running") and pick(b)]
             if "--format" in argv:
                 return ProcessOutput(stdout="".join(f"{b.id}|{b.label}|{_status_text(b)}\n" for b in hits), returncode=0)
             return ProcessOutput(stdout="".join(b.id + "\n" for b in hits), returncode=0)
