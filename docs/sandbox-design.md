@@ -357,8 +357,8 @@ Fixes made after the hand checks (commit "Sandbox Phase 2 fixes from the hand ch
 
 Still not checked by hand: `--timeout` on a real container, and the cold start with Docker Desktop stopped.
 
-**Phase 3: (c). Done in code 16 Nov 2026** (six commits, `Sandbox Phase 3, 1/6` to `6/6`). Fake tests only; the hand
-checks are listed below and are not done yet.
+**Phase 3: (c). Done 16 Nov 2026** (six commits, `Sandbox Phase 3, 1/6` to `6/6`). Fake tests in the commits; the hand
+checks are in "Phase 3 hand checks" below (all seven passed, recorded 22 Nov 2026).
 9. Merge candidate with `merge-tree` and `commit-tree`; test in a temp worktree; fast-forward only on pass.
 
 What differs from the sketch above:
@@ -390,22 +390,34 @@ What differs from the sketch above:
 - Behaviour change, as announced in Decision 2: a merge with failing tests is no longer kept. To merge anyway, read the
   diff and run `git merge --no-ff` by hand.
 
-### Phase 3 hand checks (the real check; no model call)
+### Phase 3 hand checks (no model call; done, recorded 22 Nov 2026)
 
-Run on `practice` with Docker Desktop up. If `practice` has no finished, unmerged run, make one in a scratch copy: a branch
-`orch/<id>` with a commit and a minimal `meta.json` (`status: done`, `exec.branch`, `exec.base_sha`, `exec.repo_name`).
+All seven passed (Docker Desktop 29.9.3, image `orch-sbx:py312`, git 2.56, no model call, no code change after the checks).
+They ran on a scratch **clone** of `practice` (its `origin` removed), never on the real `practice` or `orch`. Each run was a
+branch `orch/<id>` with one commit plus a minimal `meta.json` (`status: done`, `exec.branch`, `exec.base_sha`,
+`exec.repo_name`), made by a driver script kept in the session scratchpad. Checks 1 to 5 were run by Claude on 16 Nov 2026;
+checks 6 and 7 were run by hand by you and are recorded on 22 Nov 2026. Before and after each of 1 to 5: `git rev-parse HEAD`,
+`git status`, `git worktree list`, `docker ps -a --filter label=orch.run`.
 
-1. **Pass:** `orch merge <id> --repo practice` on a work branch: `PASS`, then "Merged"; `git log -1` shows a two-parent
-   commit; `git worktree list` and `docker ps -a --filter label=orch.run` show nothing left.
-2. **Fail:** the same with a failing test on the branch: exit 1, `git rev-parse HEAD` and `git status` unchanged,
-   `merge-tests.txt` holds the output.
-3. **Conflict:** both sides edit one line: an error naming the file, nothing changed.
-4. **Host untouched:** a `conftest.py` on the branch that writes a canary file into the repo folder and into
-   `%USERPROFILE%`: neither file appears on the host.
-5. **Docker stopped:** `SANDBOX ERROR`, exit 2, nothing merged.
-6. **Ctrl-C** during the tests: nothing merged, no container, no temporary worktree.
-7. **Cold venv:** if the venv volume for the merged dependency files does not exist yet, the warm container starts once
-   and `docker ps -a` is empty afterwards.
+| # | Check | Result |
+| --- | --- | --- |
+| 1 | **Pass** | `PASS` (9 passed), "Merged ... as f98b8f03 (not pushed)", exit 0. HEAD `03aed8d` to `f98b8f0`, a two-parent merge commit. Status clean, 1 worktree before and after, no container. |
+| 2 | **Fail** (a deliberately failing test on the branch) | `FAIL` with the pytest output, "Nothing was merged; work is still at 03aed8d6", the path of `merge-tests.txt` and the hint "read `orch diff <run>` first, then `git merge --no-ff <branch>`. That manual merge runs this repo's git hooks on this machine." Exit 1. HEAD `03aed8d` before and after, status clean, 1 worktree, no container. |
+| 3 | **Conflict** (both sides edit the same line of `src/practice/text.py`) | `Error: merge conflict in: src/practice/text.py. Nothing was changed.`, exit 1, no test run. HEAD `b9f74e1` before and after, status clean, 1 worktree, no container. |
+| 4 | **Already merged** (the branch was merged by hand first) | "already part of work; recorded 16bd6ef5. No tests were run.", exit 0. HEAD `16bd6ef` unchanged, status clean, 1 worktree, no container. |
+| 5 | **Host untouched** (a branch `conftest.py` that tries six writes: `/src`, `/mnt/c` and `/host_mnt/c` for the repo folder and for `C:\Users\aidil`, and `$USERPROFILE`) | All six blocked inside the container: `/src` gave "Read-only file system", the `/mnt/c` and `/host_mnt/c` paths do not exist, `USERPROFILE` is not set. The merge itself passed (the conftest was a passing test file). On the host `C:\Users\aidil\orch-canary.txt`, `C:\projects\orch-canary-repo.txt` and any `orch-canary*` in the scratch repo or worktree root were all absent. No leftover worktree or container. |
+| 6 | **Docker stopped** (`docker desktop stop`, `docker info` failed) | `SANDBOX ERROR: Docker is not running (...). Start Docker Desktop and retry, or set sandbox: off ... Nothing was run.. Nothing was merged.`, exit 2. HEAD `03aed8d` unchanged, 1 worktree. `docker ps` cannot answer while the engine is down; the scratch repo was checked again after the restart (see 7). |
+| 7 | **Ctrl-C** (one press, during a test that sleeps 120 s) | "stopping the run (Ctrl-C again: stop now)", then "Stopped by you. Nothing was merged; work is still at 03aed8d6.", exit 130. HEAD `03aed8d` unchanged, `docker ps -a --filter label=orch.run` empty. Your paste did not include `git status` or `git worktree list` for this run; Claude read them afterwards from the scratch repo: status `## work`, one worktree, no container. |
+
+Cosmetic findings (not fixed):
+- The Docker-down message ends "Nothing was run.. Nothing was merged." (double full stop: `unavailable_message` ends with a
+  full stop and the CLI adds another).
+- The engine's error text is cut at 200 characters, so it ends in "cannot f)".
+- With the engine down, `sandbox.sweep` prints one extra warning line before the `SANDBOX ERROR` line.
+
+Not checked by hand: the cold-venv warm container for a merge (the venv volume already existed for every run above, so no
+warm ran; it is covered by the fake tests only), a second Ctrl-C press, `--timeout` on a real container, and the `sandbox: off`
+path on a real repo.
 
 **Phase 4: (a).**
 10. Shim writer and `PATH` handling; tests assert the shim text equals `test_argv` and lives outside the worktree.
