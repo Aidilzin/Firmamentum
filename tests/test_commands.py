@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from orch.adapters import AgentRequest, AntigravityAdapter, ClaudeCodeAdapter
 from orch.adapters.antigravity import LONG_PROMPT_CHARS
 
@@ -79,3 +81,26 @@ def test_agy_long_prompt_file_deleted_after_run(tmp_path, monkeypatch):
     assert r.ok
     assert len(seen["files"]) == 1  # existed during the call
     assert list((tmp_path / ".orch" / "prompts").glob("*.md")) == []  # removed afterwards
+
+
+def test_claude_env_overrides_replace_a_name_whatever_its_case_and_leave_the_rest(monkeypatch):
+    monkeypatch.setenv("Path", "C:" + chr(92) + "old")
+    monkeypatch.delenv("PATH", raising=False)
+    req = AgentRequest(prompt="p", cwd=Path("."), env_overrides={"PATH": "/shims", "BASH_MAX_TIMEOUT_MS": "720000"})
+    env = ClaudeCodeAdapter().build_command(req).env
+    assert env["PATH"] == "/shims" and env["BASH_MAX_TIMEOUT_MS"] == "720000"
+    assert [k for k in env if k.upper() == "PATH"] == ["PATH"]  # never both `Path` and `PATH`
+
+
+def test_claude_refuses_an_anthropic_override_even_via_model_copy():
+    req = AgentRequest(prompt="p", cwd=Path(".")).model_copy(update={"env_overrides": {"anthropic_api_key": "sk-x"}})
+    with pytest.raises(ValueError, match="Pro login"):
+        ClaudeCodeAdapter().build_command(req)
+
+
+def test_claude_without_overrides_is_unchanged_and_agy_ignores_them(tmp_path):
+    base = ClaudeCodeAdapter().build_command(AgentRequest(prompt="p", cwd=Path(".")))
+    with_empty = ClaudeCodeAdapter().build_command(AgentRequest(prompt="p", cwd=Path("."), env_overrides={}))
+    assert base.env == with_empty.env
+    spec = AntigravityAdapter().build_command(AgentRequest(prompt="p", cwd=tmp_path, env_overrides={"X": "1"}))
+    assert "X" not in spec.env

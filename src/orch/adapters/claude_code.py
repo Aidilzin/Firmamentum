@@ -42,6 +42,12 @@ class ClaudeCodeAdapter(AgentAdapter):
             argv += ["--resume", request.resume_id]
         argv += request.extra_args
         env = child_env(SCRUBBED_ENV, request.env_passthrough)
+        for name, value in request.env_overrides.items():
+            if name.upper().startswith("ANTHROPIC_"):
+                raise ValueError(f"refusing to set {name} on claude: it must always use the Pro login")
+            for k in [k for k in env if k.upper() == name.upper()]:
+                del env[k]  # Windows env names are not case sensitive: never leave both `Path` and `PATH`
+            env[name] = value
         return CommandSpec(argv=argv, env=env, stdin_text=request.prompt)
 
     def parse_output(self, out: ProcessOutput, request: AgentRequest) -> AgentResult:

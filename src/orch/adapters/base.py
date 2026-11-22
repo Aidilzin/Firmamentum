@@ -51,6 +51,7 @@ class AgentRequest(BaseModel):
     resume_id: str | None = None  # session/conversation to continue (wired up, UNTESTED)
     extra_args: list[str] = Field(default_factory=list)  # e.g. permission flags, set by later phases
     env_passthrough: list[str] = Field(default_factory=list)  # extra env var names the child may see (per-repo config)
+    env_overrides: dict[str, str] = Field(default_factory=dict)  # name -> value set on the child (PATH for the orch-test shim)
     cancel: threading.Event | None = Field(default=None, exclude=True)  # set = kill the child; never serialised
 
 
