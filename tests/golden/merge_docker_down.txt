@@ -1,0 +1,8 @@
+exit: 2
+--- output ---
+testing the merge result in the sandbox; work is not touched until the tests pass
+SANDBOX ERROR: Docker is not running (failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.). Start Docker Desktop and retry, or set `sandbox: off` for repo demo in config.yaml (tests then run on this machine with your rights). Nothing was run. Nothing was merged.
+--- stderr ---
+testing the merge result in the sandbox; work is not touched until the tests pass
+SANDBOX ERROR: Docker is not running (failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.). Start Docker Desktop and retry, or set `sandbox: off` for repo demo in config.yaml (tests then run on this machine with your rights). Nothing was run. Nothing was merged.
+--- end ---

@@ -27,6 +27,16 @@ def repo(tmp_path, sandbox_kind="docker", name="demo"):
 # ---------- test_argv ----------
 
 
+def test_clip_cuts_at_a_word_boundary_and_marks_it():
+    text = "failed to connect to the docker API at npipe: check if the path is correct " * 4
+    out = sandbox._clip(text, 60)
+    assert out.endswith("…") and len(out) <= 61 and not out[:-1].endswith(" ")
+    assert text.startswith(out[:-1]) and text[len(out) - 1] == " "  # whole words only
+    assert sandbox._clip("short", 60) == "short" and sandbox._clip("a" * 60, 60) == "a" * 60
+    assert sandbox._clip("word " * 20, 10) == "word word…"  # the limit falls on a space
+    assert sandbox._clip("x" * 100, 10) == "x" * 10 + "…"  # one long word: cut it, never return an empty string
+
+
 def test_argv_is_closed_by_default(tmp_path):
     a = sandbox.test_argv(SPEC, tmp_path, ["uv", "run", "pytest", "-q"], "run-1", "orch-venv-abc")
     assert a[:2] == ["docker", "run"]

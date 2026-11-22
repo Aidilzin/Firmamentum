@@ -79,6 +79,23 @@ def test_docker_not_running_stops_before_anything_is_merged(done, fake_docker, m
     assert git(repo, "rev-parse", "HEAD") == before and fake_docker.runs == []
 
 
+def test_with_the_engine_down_the_sandbox_error_is_the_only_complaint(done, fake_docker, monkeypatch):
+    repo, run_dir, rr = done
+    monkeypatch.setattr(sandbox, "docker_probe", lambda image: sandbox.ProbeResult(False, detail="engine stopped"))
+    fake_docker.fail["ps"] = ProcessOutput(returncode=1, stderr="cannot connect to the docker API")
+    logs = []
+    r = merge_run(rr, run_dir, log=logs.append)
+    assert r.outcome == "cannot_run" and not [m for m in logs if m.startswith("warning")]
+
+
+def test_a_failing_sweep_with_a_working_engine_still_warns(done, fake_docker):
+    repo, run_dir, rr = done
+    fake_docker.fail["ps"] = ProcessOutput(returncode=1, stderr="listing is broken today")
+    logs = []
+    assert merge_run(rr, run_dir, log=logs.append).outcome == "merged"
+    assert any(m.startswith("warning: could not list sandbox containers") for m in logs)
+
+
 def test_a_container_left_by_a_killed_merge_is_removed_first(done, fake_docker):
     repo, run_dir, rr = done
     fake_docker.plant(run_dir.name, "running")

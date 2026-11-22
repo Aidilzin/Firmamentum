@@ -82,14 +82,19 @@ def _run_in_sandbox(repo: ResolvedRepo, cfg: SandboxConfig, argv: list[str], com
                     log: Callable[[str], None]) -> TestOutcome:  # fmt: skip
     """The candidate worktree is mounted read-only in a container with no network, the same path a run's own tests take.
     A problem with the sandbox itself is `cannot_run` (never a test failure), so nothing is merged either way."""
+    warnings: list[str] = []  # held back: when the engine is down the SANDBOX ERROR line says it, once
     try:
-        gone = sandbox.sweep(run_id, log)  # leftovers of a merge that was killed hard (the run lock proves nobody owns them)
+        gone = sandbox.sweep(run_id, warnings.append)  # leftovers of a merge killed hard (the run lock proves nobody owns them)
     except sandbox.SandboxError as e:
-        log(f"warning: no orphan sweep: {e}")
+        warnings.append(f"warning: no orphan sweep: {e}")
         gone = []
     if gone:
         log(f"removed {len(gone)} sandbox container(s) left over from an earlier process of this run")
     res = sandbox.run_tests(repo, cfg, folder, argv, run_id, warm_src=warm_src, timeout_s=TEST_TIMEOUT_S, cancel=cancel, log=log)
+    engine_down = res.kind == "infra" and ("Docker is not running" in res.detail or "not found on PATH" in res.detail)
+    if not engine_down:
+        for w in warnings:
+            log(w)
     text = f"$ {command}\n[sandbox: docker]\n[exit {res.exit_code}]\n{res.stdout}\n--- stderr ---\n{res.stderr}\n"
     if res.kind == "cancelled":
         return TestOutcome("cancelled", None, text, "cancelled")

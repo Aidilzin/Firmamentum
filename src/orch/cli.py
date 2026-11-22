@@ -629,7 +629,8 @@ def merge(
         raise typer.Exit(130)
     if r.outcome == "cannot_run":
         what = "SANDBOX ERROR" if target.sandbox == "docker" else "Tests on the merge result: could not run"
-        typer.echo(f"{what}: {r.tests_detail}. Nothing was merged.", err=True)
+        detail = r.tests_detail.rstrip()
+        typer.echo(f"{what}: {detail}{'' if detail.endswith(('.', '…')) else '.'} Nothing was merged.", err=True)
         raise typer.Exit(2)
     if r.outcome == "tests_failed":
         typer.echo(f"Tests on the merge result: FAIL ({r.tests_detail})")

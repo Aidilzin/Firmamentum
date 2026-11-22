@@ -409,11 +409,13 @@ checks 6 and 7 were run by hand by you and are recorded on 22 Nov 2026. Before a
 | 6 | **Docker stopped** (`docker desktop stop`, `docker info` failed) | `SANDBOX ERROR: Docker is not running (...). Start Docker Desktop and retry, or set sandbox: off ... Nothing was run.. Nothing was merged.`, exit 2. HEAD `03aed8d` unchanged, 1 worktree. `docker ps` cannot answer while the engine is down; the scratch repo was checked again after the restart (see 7). |
 | 7 | **Ctrl-C** (one press, during a test that sleeps 120 s) | "stopping the run (Ctrl-C again: stop now)", then "Stopped by you. Nothing was merged; work is still at 03aed8d6.", exit 130. HEAD `03aed8d` unchanged, `docker ps -a --filter label=orch.run` empty. Your paste did not include `git status` or `git worktree list` for this run; Claude read them afterwards from the scratch repo: status `## work`, one worktree, no container. |
 
-Cosmetic findings (not fixed):
-- The Docker-down message ends "Nothing was run.. Nothing was merged." (double full stop: `unavailable_message` ends with a
-  full stop and the CLI adds another).
-- The engine's error text is cut at 200 characters, so it ends in "cannot f)".
-- With the engine down, `sandbox.sweep` prints one extra warning line before the `SANDBOX ERROR` line.
+Cosmetic findings (all three fixed on 22 Nov 2026; golden `merge_docker_down`):
+- The Docker-down message ended "Nothing was run.. Nothing was merged." (double full stop). The CLI now adds a full stop
+  only when the detail has none.
+- The engine's error text was cut mid-word at 200 characters ("cannot f)"). `sandbox._clip` cuts at a word boundary and
+  marks it with "…".
+- With the engine down, `sandbox.sweep` printed one extra warning line before the `SANDBOX ERROR` line. `orch merge` now
+  holds sweep warnings back and drops them when the result says the engine is down; with a working engine they still show.
 
 Not checked by hand: the cold-venv warm container for a merge (the venv volume already existed for every run above, so no
 warm ran; it is covered by the fake tests only), a second Ctrl-C press, `--timeout` on a real container, and the `sandbox: off`

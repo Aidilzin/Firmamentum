@@ -176,8 +176,18 @@ class ProbeResult:
         return self.engine_ok and self.image_ok
 
 
+def _clip(text: str, limit: int = 200) -> str:
+    """`text` cut at the last word boundary within `limit` characters and marked with "…"; short text is returned as is."""
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    if text[limit] != " " and " " in head:
+        head = head.rsplit(" ", 1)[0]
+    return head.rstrip(" ,;:(") + "…"
+
+
 def _first_line(text: str) -> str:
-    return next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), "")[:200]
+    return _clip(next((ln.strip() for ln in (text or "").splitlines() if ln.strip()), ""))
 
 
 def docker_probe(image: str) -> ProbeResult:
@@ -454,7 +464,7 @@ def _warm(spec: Spec, run_id: str, volume: str, warm_src: WarmSource, cancel: th
     if res.kind == "ran" and res.exit_code == 0:
         return None
     if res.kind == "ran":
-        tail = next((ln.strip() for ln in reversed((out.stderr or out.stdout).splitlines()) if ln.strip()), "")[:200]
+        tail = _clip(next((ln.strip() for ln in reversed((out.stderr or out.stdout).splitlines()) if ln.strip()), ""))
         return _infra(f"preparing the test environment failed (exit {res.exit_code}): {tail}", out)
     return TestRun("infra", res.exit_code, res.stdout, res.stderr, f"preparing the test environment failed: {res.detail}")
 

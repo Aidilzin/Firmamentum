@@ -13,7 +13,7 @@ from test_cancel import cancelled_result, cancels
 from test_executor import FILE_CMD, FakeBuilder, edit, env, fail, report  # noqa: F401  (env is a fixture)
 from test_phase4 import issue, review, write_cfg
 
-from orch import budget, cli
+from orch import budget, cli, sandbox
 from orch.adapters.base import AgentResult, ErrorKind
 from orch.runs import load_meta, write_meta
 
@@ -549,6 +549,18 @@ def test_the_merge_says_where_the_tests_run(g, tmp_path, monkeypatch):
     r = invoke(["merge", run_dir.name, "--repo", "demo"])
     assert r.exit_code == 0 and "Merged" in r.output
     assert "sandbox: off (tests run on this machine, unconfined)" in r.stderr and "on this machine; work" in r.stderr
+
+
+def test_merge_when_docker_is_not_running(g, monkeypatch):
+    run_dir = _done_run(g, monkeypatch)
+    git(g[0], "checkout", "-q", "-b", "work")
+    down = sandbox.ProbeResult(False, detail="failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; "
+                               "check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: "
+                               "The system cannot find the file specified.")  # fmt: skip
+    monkeypatch.setattr(sandbox, "docker_probe", lambda image: down)
+    r = invoke(["merge", run_dir.name, "--repo", "demo"])
+    assert r.exit_code == 2 and ".." not in r.output and r.output.count("Docker is not running") == 1
+    g[3]("merge_docker_down", r)
 
 
 def test_merge_into_main_when_allowed(g, monkeypatch):
