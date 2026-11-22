@@ -2,9 +2,11 @@ exit: 0
 --- output ---
 warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys; sys.exit(0)"'; using config
 [s1] Do s1: Maxwell (builder) building
+[s1] builder ran orch-test 0 times
 [s1] Loschmidt (reviewer) reviewing
 [s1] review: reject (1 blocking, 0 minor)
 [s1] Descartes (repair) round 1/3: review
+[s1] repair ran orch-test 0 times
 [s1] Loschmidt reviewing
 [s1] review: approve (0 blocking, 1 minor)
 [s1] done <SHA>

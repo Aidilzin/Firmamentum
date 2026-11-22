@@ -32,6 +32,7 @@ from .adapters.process import child_env, run_process
 from . import review as review_mod
 from . import runlock
 from . import sandbox
+from . import shim
 from . import warm
 from .build import BuildReport, load_schema_file
 from .checks import classify, is_self_hosting_repo, outside_plan
@@ -76,6 +77,19 @@ class ExecError(RuntimeError):
     """A precondition failed; nothing was run."""
 
 
+# The test environment check before an agent call may have to prepare the venv volume (network, once per dependency change).
+PREWARM_TIMEOUT_S = 15 * 60
+
+
+class _ShimCall:
+    """One agent call's shim: the handle while it runs, and what was found out after it."""
+
+    def __init__(self, handle: shim.ShimHandle) -> None:
+        self.handle = handle
+        self.problem: str | None = None  # the shim files were changed or removed
+        self.calls: list[shim.Call] = []  # what the runner recorded
+
+
 @dataclass
 class ExecOutcome:
     status: str  # done | paused | cancelled | failed | needs_input | awaiting_approval | rejected
@@ -98,10 +112,13 @@ def reviewer_instructions() -> str:
     return (ROLES_DIR / "reviewer.md").read_text(encoding="utf-8")
 
 
-def repair_args(test_command: str, retest_command: str | None, role_text: str, input_dir: Path) -> list[str]:
-    """Same permissions as the Builder, plus read access to ONE folder of per-round inputs (never the step folder)."""
-    extra = (retest_command,) if retest_command else ()
-    return builder_args(test_command, role_text, extra) + ["--add-dir", str(input_dir)]
+def repair_args(
+    test_command: str, retest_command: str | None, role_text: str, input_dir: Path, *, sandboxed: bool = False
+) -> list[str]:
+    """Same permissions as the Builder, plus read access to ONE folder of per-round inputs (never the step folder).
+    Sandboxed: the one Bash command is `orch-test` and there is no retest (the sandbox skips it)."""
+    extra = (retest_command,) if retest_command and not sandboxed else ()
+    return builder_args(test_command, role_text, extra, sandboxed=sandboxed) + ["--add-dir", str(input_dir)]
 
 
 def reviewer_args(agent: str, role_text: str, step_dir: Path) -> tuple[list[str], str | None]:
@@ -117,10 +134,15 @@ def reviewer_args(agent: str, role_text: str, step_dir: Path) -> tuple[list[str]
     return ["--mode", "plan", "--sandbox", "--add-dir", str(step_dir)], role_text
 
 
-def builder_args(test_command: str, role_text: str, extra_commands: tuple[str, ...] = ()) -> list[str]:
-    """Exact tool permissions for the Builder. Commands MUST come from config.yaml, never from the plan."""
+def builder_args(
+    test_command: str, role_text: str, extra_commands: tuple[str, ...] = (), *, sandboxed: bool = False
+) -> list[str]:
+    """Exact tool permissions for the Builder. Commands MUST come from config.yaml, never from the plan.
+    Sandboxed (a `sandbox: docker` repo): the one Bash command is the `orch-test` shim, which runs the same tests in the
+    container; the host never executes anything the agent wrote."""
     allowed = ["Read", "Grep", "Glob", "Edit", "Write"]
-    for c in dict.fromkeys([test_command, *extra_commands]):
+    commands = [shim.SHIM_NAME] if sandboxed else [test_command, *extra_commands]
+    for c in dict.fromkeys(commands):
         allowed.append(f"Bash({c})")  # exact match only: a trailing `*` lets pytest flags (--basetemp, -p) through
     return [
         *CONFINE_ARGS,
@@ -132,7 +154,10 @@ def builder_args(test_command: str, role_text: str, extra_commands: tuple[str, .
     ]  # fmt: skip
 
 
-def build_prompt(plan: Plan, step: Step, done_titles: list[str], test_command: str, answers: list[str] | None = None) -> str:
+def build_prompt(
+    plan: Plan, step: Step, done_titles: list[str], test_command: str, answers: list[str] | None = None, *,
+    sandboxed: bool = False,
+) -> str:  # fmt: skip
     lines = ["## Goal", plan.goal, ""]
     if plan.assumptions:
         lines += ["## Assumptions", *[f"- {a}" for a in plan.assumptions], ""]
@@ -152,11 +177,19 @@ def build_prompt(plan: Plan, step: Step, done_titles: list[str], test_command: s
     lines += [
         "## Test command",
         f"Run this before you finish: {test_command}",
+        *([SANDBOX_NOTE, ""] if sandboxed else []),
         "",
         "Do only this step. Reply with the JSON report only.",
     ]
     return "\n".join(lines)
 
+
+SANDBOX_NOTE = (
+    "`orch-test` runs the project's tests in a sandbox: a Linux container with no network and nothing outside a copy of "
+    "your working directory. It takes no arguments. Its output and exit code are pytest's own. If it prints a line "
+    "starting `ORCH SANDBOX ERROR`, the sandbox itself failed; that is not a test failure and no code change fixes it. "
+    "Stop, set `blocked` to true and put that line in `question`."
+)
 
 HIDDEN_NOTE_REVIEW = (
     "## Files added by the orchestrator on purpose\n"
@@ -179,6 +212,7 @@ RESUME_HEADER = (
 def repair_prompt(
     plan: Plan, step: Step, ctx: dict, test_tail: str, input_dir: Path, test_command: str,
     retest_command: str | None, answers: list[str] | None = None, hidden_files: list[str] | None = None,
+    *, sandboxed: bool = False,
 ) -> str:  # fmt: skip
     reasons = []
     if "tests" in ctx["reasons"]:
@@ -208,8 +242,9 @@ def repair_prompt(
         "- diff.patch (the current uncommitted change of this step), test_tail.txt, review_issues.json",
         "",
         "## Test commands",
-        *([f"Quick re-test first: {retest_command}"] if retest_command else []),
+        *([f"Quick re-test first: {retest_command}"] if retest_command and not sandboxed else []),
         f"Full test command (must pass): {test_command}",
+        *([SANDBOX_NOTE] if sandboxed else []),
         "",
         "Fix this step only. Reply with the JSON report only.",
     ]  # fmt: skip
@@ -770,6 +805,70 @@ class Executor:
                        resume_phase=None)  # fmt: skip
         return self._stop("failed", sid, f"{role_name} failed: {result.error_kind.value}")
 
+    # -- the orch-test shim (docker repos): the agent's one Bash command runs the tests in the container --
+    @property
+    def _sandboxed(self) -> bool:
+        return self.repo.sandbox == "docker"
+
+    def _shim_stop(self, sid: str, role: str, detail: str, resume_phase: str | None, *, called: bool) -> ExecOutcome:
+        self._set_step(sid, status="pending", error=detail, stage="sandbox", resume_phase=resume_phase)
+        tail = "" if called else f" The {role} was not called."
+        return self._stop("failed", sid, f"sandbox problem for {sid}: {detail}.{tail} Fix it, then `orch resume`.")
+
+    def _shim_begin(
+        self, sid: str, role: str, resume_phase: str | None, input_dir: Path | None = None
+    ) -> tuple[ExecOutcome | None, _ShimCall | None]:
+        """Before a builder or repair call on a docker repo: prepare the test environment (the only network use), then write
+        the shim. Returns (stop, None) when the call must not happen; (None, None) for a `sandbox: off` repo."""
+        if not self._sandboxed:
+            return None, None
+        try:
+            src = workspace._guard(self.wt, self.repo.path, self._branch)
+            argv = shlex.split(self.test_command)
+        except (workspace.GuardError, ValueError) as e:
+            return self._shim_stop(sid, role, f"worktree or test command refused: {e}", resume_phase, called=False), None
+        res = sandbox.run_tests(self.repo, self.cfg.sandbox, src, ["true"], self.run_dir.name, warm_src=self._warm_source,
+                                timeout_s=PREWARM_TIMEOUT_S, cancel=self._cancel, log=self.log)  # fmt: skip
+        if res.kind == "cancelled":
+            return self._cancelled(sid, resume_phase), None
+        if not res.passed:
+            why = res.detail or f"the test environment check ended with {res.kind} (exit {res.exit_code})"
+            return self._shim_stop(sid, role, f"could not prepare the test environment: {why}", resume_phase, called=False), None
+        try:
+            handle = shim.write_shim(self.run_dir.name, src, self.repo, self.cfg.sandbox, self._branch, argv, TEST_TIMEOUT_S)
+            shim.assert_outside(handle, src, *([input_dir] if input_dir else []))
+        except shim.ShimError as e:
+            return self._shim_stop(sid, role, f"cannot write the orch-test shim: {e}", resume_phase, called=False), None
+        return None, _ShimCall(handle)
+
+    def _shim_end(self, sid: str, role: str, sc: _ShimCall | None) -> None:
+        """After the agent call, on every way out (also a crash or Ctrl-C): remove any container the call left behind, check
+        the shim files, read what the runner recorded, remove the folder."""
+        if sc is None:
+            return
+        try:
+            sandbox.sweep(self.run_dir.name, self.log)
+        finally:
+            sc.problem = shim.verify(sc.handle)
+            sc.calls = shim.read_calls(sc.handle)
+            shim.remove(sc.handle)
+        self.log(f"[{sid}] {role} {shim.summary(sc.calls)}")
+        for c in shim.infra_calls(sc.calls):
+            self.log(f"warning [{sid}]: orch-test could not run the tests: {c.detail}")
+
+    def _shim_tamper(self, sid: str, role: str, sc: _ShimCall | None) -> ExecOutcome | None:
+        if sc is None or sc.problem is None:
+            return None
+        return self._shim_stop(sid, role, f"{sc.problem}; the agent's work was not used", None, called=True)
+
+    def _shim_infra_block(self, sid: str, role: str, sc: _ShimCall | None, resume_phase: str | None) -> ExecOutcome | None:
+        """The agent says it is blocked. If the runner recorded a sandbox problem (and ONLY then: the agent's words and the
+        tests' output are never read for this), the question is about the sandbox, which only you can fix."""
+        infra = shim.infra_calls(sc.calls) if sc is not None else []
+        if not infra:
+            return None
+        return self._shim_stop(sid, role, f"orch-test could not run the tests: {infra[-1].detail}", resume_phase, called=True)
+
     # -- one step --
     def _run_step(self, step: Step, phase: str | None = None) -> ExecOutcome | None:
         """Returns an ExecOutcome to stop the run, or None to continue."""
@@ -812,20 +911,33 @@ class Executor:
         sid = step.id
         steps = self.meta["steps"]
         done_titles = [steps[s.id]["title"] for s in self.plan.topo_order() if steps[s.id]["status"] == "done"]
-        prompt = build_prompt(self.plan, step, done_titles, self.test_command, self._st(sid)["answers"])
+        stop, sc = self._shim_begin(sid, "builder", None)
+        if stop is not None:
+            return stop
+        sandboxed = sc is not None
+        prompt = build_prompt(self.plan, step, done_titles, shim.SHIM_NAME if sandboxed else self.test_command,
+                              self._st(sid)["answers"], sandboxed=sandboxed)  # fmt: skip
+        env = shim.shim_env(sc.handle, TEST_TIMEOUT_S) if sc else {}
 
         def req(entry: Entry) -> AgentRequest:
             return AgentRequest(prompt=prompt, cwd=self.wt, model=entry.model, timeout_s=BUILDER_TIMEOUT_S,
-                                json_schema=load_schema_file(),
-                                extra_args=builder_args(self.test_command, builder_instructions()))  # fmt: skip
+                                json_schema=load_schema_file(), env_overrides=env,
+                                extra_args=builder_args(self.test_command, builder_instructions(), sandboxed=sandboxed))  # fmt: skip
 
-        result = self._agent(sid, "builder", req)
+        try:
+            result = self._agent(sid, "builder", req)
+        finally:
+            self._shim_end(sid, "builder", sc)
+        if (stop := self._shim_tamper(sid, "builder", sc)) is not None:
+            return stop
         if not result.ok:
             return self._agent_stop(sid, "builder", result, None)
         report = _parse_report(result)
         if report is None:
             self._warn(sid, "builder reply was not a valid report; relying on git and the tests")
         elif report.blocked:
+            if (stop := self._shim_infra_block(sid, "builder", sc, None)) is not None:
+                return stop
             self._set_step(sid, status="needs_input", question=report.question, stage="builder")
             return self._stop("needs_input", sid, f"builder is blocked: {report.question}")
         return None
@@ -1116,9 +1228,15 @@ class Executor:
         tail = tail_lines(sdir / st["last_failure"], TAIL_LINES) if "tests" in ctx["reasons"] and st.get("last_failure") else ""
         (rin / "test_tail.txt").write_text(tail or "(no test failure this round)\n", encoding="utf-8")
         (rin / "review_issues.json").write_text(json.dumps(ctx["issues"], indent=2) + "\n", encoding="utf-8")
-        prompt = repair_prompt(self.plan, step, ctx, tail, rin.resolve(), self.test_command, self.retest_command,
-                               st["answers"], st.get("hidden_files") or None)  # fmt: skip
-        args = repair_args(self.test_command, self.retest_command, repair_instructions(), rin.resolve())
+        stop, sc = self._shim_begin(sid, "repair", "need_repair", rin.resolve())
+        if stop is not None:
+            return stop
+        sandboxed = sc is not None
+        prompt = repair_prompt(self.plan, step, ctx, tail, rin.resolve(), shim.SHIM_NAME if sandboxed else self.test_command,
+                               self.retest_command, st["answers"], st.get("hidden_files") or None,
+                               sandboxed=sandboxed)  # fmt: skip
+        args = repair_args(self.test_command, self.retest_command, repair_instructions(), rin.resolve(), sandboxed=sandboxed)
+        env = shim.shim_env(sc.handle, TEST_TIMEOUT_S) if sc else {}
         schema = load_schema_file()
 
         session_entry = st.get("session_entry")
@@ -1129,7 +1247,7 @@ class Executor:
             def req(entry: Entry) -> AgentRequest:
                 resume = bool(allow_resume and st.get("session_id") and entry.label == session_entry)
                 return AgentRequest(prompt=(RESUME_HEADER + prompt) if resume else prompt, cwd=self.wt, model=entry.model,
-                                    timeout_s=REPAIR_TIMEOUT_S, json_schema=schema,
+                                    timeout_s=REPAIR_TIMEOUT_S, json_schema=schema, env_overrides=env,
                                     resume_id=st["session_id"] if resume else None, extra_args=args)  # fmt: skip
 
             return self._agent(sid, "repair", req)
@@ -1138,15 +1256,18 @@ class Executor:
         self.log(f"[{sid}] repair round {st['rounds_used'] + 1}/{self.cfg.max_repair_rounds}: " + " + ".join(ctx["reasons"]))
         mode, resume_failed = "fresh", False
         result: AgentResult | None = None
-        if st.get("session_id"):
-            result = call(True)
-            if result.ok or result.error_kind in (ErrorKind.RATE_LIMITED, ErrorKind.CANCELLED):
-                mode = "resumed" if (self.last_entry and self.last_entry.label == session_entry) else "fresh"
-            else:
-                self.log(f"[{sid}] resume failed ({result.error_kind.value}); using a fresh call")
-                result, mode, resume_failed = None, "fresh", True
-        if result is None:
-            result = call(False)
+        try:
+            if st.get("session_id"):
+                result = call(True)
+                if result.ok or result.error_kind in (ErrorKind.RATE_LIMITED, ErrorKind.CANCELLED):
+                    mode = "resumed" if (self.last_entry and self.last_entry.label == session_entry) else "fresh"
+                else:
+                    self.log(f"[{sid}] resume failed ({result.error_kind.value}); using a fresh call")
+                    result, mode, resume_failed = None, "fresh", True
+            if result is None:
+                result = call(False)
+        finally:
+            self._shim_end(sid, "repair", sc)  # containers swept, shim files checked and removed, on every way out
         if result.error_kind == ErrorKind.CANCELLED:  # no round is counted; a killed repair left partial edits: rebuild
             return self._cancelled(sid, None)
         report = _parse_report(result) if result.ok else None
@@ -1167,11 +1288,15 @@ class Executor:
                 "tokens": st["roles_tokens"].get("repair", 0) - before, "retest": None, "tests": None, "verdict": None,
             })  # fmt: skip
             self._set_step(sid, rounds_used=st["rounds_used"] + 1, rounds_total=n)
+        if (stop := self._shim_tamper(sid, "repair", sc)) is not None:
+            return stop
         if not result.ok:
             return self._agent_stop(sid, "repair", result, "need_repair")
         if report is None:
             self._warn(sid, "repair reply was not a valid report; relying on git and the tests")
         elif report.blocked:
+            if (stop := self._shim_infra_block(sid, "repair", sc, "need_repair")) is not None:
+                return stop
             self._set_step(sid, status="needs_input", question=report.question, stage="repair")
             return self._stop("needs_input", sid, f"repair is blocked: {report.question}")
         return None

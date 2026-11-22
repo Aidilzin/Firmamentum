@@ -123,7 +123,7 @@ def test_two_steps_pass_commit_and_stay_outside_repo(env, isolated_worktree_root
 def test_builder_permissions_are_exact(env):
     repo, setup, executor = env
     run_dir, rr = setup(plan=good_plan(steps=[step("s1")]), test_command=PASS_CMD)
-    ex, fb = executor(run_dir, rr, [edit({"src/s1.py": "x\n"})])
+    ex, fb = executor(run_dir, rr.model_copy(update={"sandbox": "off"}), [edit({"src/s1.py": "x\n"})])  # the host path
     ex.start()
     sent = fb.requests[0].extra_args
     assert sent[sent.index("--allowedTools") + 1].split(",")[5:] == [f"Bash({PASS_CMD})"]
@@ -148,7 +148,7 @@ def test_plan_test_command_is_never_used(env):
     plan = good_plan(test_command="git push", steps=[step("s1")])
     run_dir, rr = setup(plan=plan)
     logs = []
-    ex, fb = executor(run_dir, rr, [edit({"src/s1.py": "x\n"})], logs)
+    ex, fb = executor(run_dir, rr.model_copy(update={"sandbox": "off"}), [edit({"src/s1.py": "x\n"})], logs)  # the host path
     assert ex.start().status == "done"
     req = fb.requests[0]
     assert "git push" not in " ".join(req.extra_args) and "git push" not in req.prompt

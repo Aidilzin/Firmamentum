@@ -1,6 +1,7 @@
 exit: 0
 --- output ---
 [s1] Do s1: Maxwell (builder) building
+[s1] builder ran orch-test 0 times
 [s1] done <SHA>
 
 *  step 1 of 1 · done · Do s1

@@ -2,6 +2,7 @@ exit: 2
 --- output ---
 warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys,pathlib; sys.exit(0 if pathlib.Path(\'ok.txt\').exists() else 1)"'; using config
 [s1] Do s1: Maxwell (builder) building
+[s1] builder ran orch-test 0 times
 
 [!]  step 1 of 1 · needs your approval · Do s1
 sandbox: docker

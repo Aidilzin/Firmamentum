@@ -32,6 +32,8 @@ class DockerSim:
     def __init__(self) -> None:
         self.calls: list[list[str]] = []  # every argv sent to the engine, in order (run and short calls)
         self.runs: list[dict] = []  # one entry per docker_run: argv, inner, src, env
+        self.prewarms: list[dict] = []  # the same, for the environment check run (`true`) before an agent call
+        self.prewarm_script: list[Callable[[DockerSim, Box, list[str]], ProcessOutput]] = []  # overrides for those
         self.boxes: dict[str, Box] = {}  # by name
         self.script: list[Callable[[DockerSim, Box, list[str]], ProcessOutput]] = []  # overrides, one per docker_run
         self.fail: dict[str, ProcessOutput] = {}  # a short call that fails, by subcommand ("ps", "rm", "inspect")
@@ -58,13 +60,19 @@ class DockerSim:
     # -- the two seams --
     def docker_run(self, argv, *, inner, src, env, timeout_s, cancel=None) -> ProcessOutput:
         self.calls.append(list(argv))
-        self.runs.append({"argv": list(argv), "inner": list(inner), "src": src, "env": env})
+        prewarm = list(inner) == ["true"]  # the executor's "is the test environment ready" run before an agent call
+        (self.prewarms if prewarm else self.runs).append({"argv": list(argv), "inner": list(inner), "src": src, "env": env})
         if self.on_call:
             self.on_call(argv)
         label = (_after(argv, "--label") or "").removeprefix("orch.run=")
         name = _after(argv, "--name") or f"anon-{len(self.runs)}"
         self._n += 1
         box = self.boxes[name] = Box(f"{self._n:012x}", name, label)
+        if prewarm:  # never consumes `script`, never runs on the host; `prewarm_script` overrides it
+            if self.prewarm_script:
+                return self.prewarm_script.pop(0)(self, box, argv)
+            box.status, box.exit_code = "exited", 0
+            return ProcessOutput(returncode=0)
         if self.script:
             return self.script.pop(0)(self, box, argv)
         out = run_process(inner, cwd=src, env=env or child_env(), timeout_s=timeout_s, cancel=cancel)

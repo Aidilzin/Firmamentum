@@ -2,6 +2,7 @@ exit: 130
 --- output ---
 warning: plan test_command 'uv run pytest -q' differs from config 'python -c "import sys; sys.exit(0)"'; using config
 [s1] Do s1: Maxwell (builder) building
+[s1] builder ran orch-test 0 times
 
 .  step 1 of 1 · stopped by you · Do s1
 sandbox: docker

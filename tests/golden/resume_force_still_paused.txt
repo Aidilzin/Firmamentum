@@ -1,6 +1,7 @@
 exit: 3
 --- output ---
 [s1] Do s1: Maxwell (builder) building
+[s1] builder ran orch-test 0 times
 
 .  step 1 of 1 · paused · Do s1
 sandbox: docker
