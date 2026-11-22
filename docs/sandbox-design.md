@@ -421,14 +421,55 @@ Not checked by hand: the cold-venv warm container for a merge (the venv volume a
 warm ran; it is covered by the fake tests only), a second Ctrl-C press, `--timeout` on a real container, and the `sandbox: off`
 path on a real repo.
 
-**Phase 4: (a).**
-10. Shim writer and `PATH` handling; tests assert the shim text equals `test_argv` and lives outside the worktree.
+**Phase 4: (a). Code and fake tests done 22 Nov 2026** (six commits, `Sandbox Phase 4, 1/6` to `6/6`). The five free hand checks
+and the one real model check are below and are **not yet recorded**.
+10. Shim writer and `PATH` handling; tests assert the shim lives outside the worktree and the folders the agent can reach.
 11. `builder_args` and `repair_args` use `Bash(orch-test)`; prompt text updated.
 12. **The one real check** (one `--model sonnet` call, about 10k to 20k tokens): in a scratch worktree of `practice`,
     plant a test that tries to read a canary file on the host, write outside `/work`, and connect to a public address,
     and prints what happened. Prompt: "Run orch-test and reply with its last line." Pass means the Bash call was
     allowed, all three attempts failed, and `permission_denials` is empty. Record it in `docs/probe-results.md`.
 13. README "Security model and limits" rewritten for the new boundary.
+
+What differs from the sketch above:
+- **The shim calls back into orch instead of `exec docker run`.** `orch-test` is `exec python -I -m orch.shim <ticket>`, so the
+  agent's runs go through `sandbox.run_tests` (engine check of the exit code, unique container names, the exit-96 rule)
+  instead of a second, weaker copy of the argv. Under the design's version a sandbox error would have looked like a failed
+  test. The ticket (`ticket.json`) is written by orch from `config.yaml` and orch's own state; the runner reads nothing from the
+  worktree and validates the worktree again with `workspace._guard`.
+- **Runs the same way every time.** Files: `orch-test` (LF only, `#!/bin/sh`, no-arguments guard, `MSYS_NO_PATHCONV=1`),
+  `ticket.json`, `calls.jsonl`, in `<worktree root>/../shims/<run id>/`. Rule: exactly `Bash(orch-test)`. The folder goes first
+  on the agent's `PATH` through the new `AgentRequest.env_overrides` (merged case-insensitively; `ANTHROPIC_*` refused).
+  `BASH_DEFAULT_TIMEOUT_MS` and `BASH_MAX_TIMEOUT_MS` are set to the runner's timeout plus 120 s (both names are in the Claude
+  Code environment-variable docs, in milliseconds).
+- **Tamper check.** orch stores a hash of `orch-test` and `ticket.json`, compares them after the call and stops the step
+  (`stage: sandbox`) on any change, without using that call's work. Besides, the folder is checked to be outside the worktree
+  and the repair input folder, and is deleted after every call.
+- **Infra comes from `calls.jsonl` only.** A `blocked` report with a recorded sandbox problem stops the run as `failed`
+  (`stage: sandbox`); without a record, a `blocked` report is an ordinary question for you, whatever it says. A test that prints
+  `ORCH SANDBOX ERROR` and exits 1 is a failed test.
+- **Environment check before each call.** One container run of `true` (through `sandbox.run_tests`, with the warm step behind
+  it) before every builder and repair call. If it fails the agent is not called and no quota is spent (`stage: sandbox`; repair
+  resumes at `need_repair`).
+- **`run_tests(own_only=True)`** removes only the containers that call started, so two `orch-test` calls of one run do not kill
+  each other. After every agent call the executor still removes every container of the run by label.
+- **The retest is not offered** to a sandboxed repair agent (it is skipped anyway).
+- **Probe.** `orch sandbox test --probe` has a fourth test: read a real host canary file outside everything mounted, under every
+  spelling Docker Desktop could expose (`/mnt/c/...`, `/host_mnt/c/...`, `/run/desktop/mnt/host/c/...`, `/mnt/host/c/...`, `/c/...`).
+- **Known limit.** A test that itself exits with 96 is shown to the agent as the dependency message. orch's own runs treat it the
+  same way (it never passes).
+
+Hand checks (no model call, scratch clone of `practice`, driver in the session scratchpad):
+1. From Git Bash with the shim's PATH: `orch-test` prints pytest's output and exits 0; a failing test exits 1 with the output.
+2. `orch-test -k x` prints "takes no arguments" and exits 2.
+3. Edit `uv.lock` in the worktree, run `orch-test`: the dependency message, exit 75.
+4. Ctrl-C during a long test, then the executor-style sweep: `docker ps -a --filter label=orch.run` is empty.
+5. `orch sandbox test --repo practice --probe`: four `blocked` lines.
+
+The real check (exactly one `--model sonnet` call, scratch clone of `practice` with its `origin` removed, a canary file in the
+orch folder, the probe planted as a test, prompt "Run orch-test and reply with its last line."): pass means the reply is the
+`N passed` line, `permission_denials` is empty, `calls.jsonl` shows one `ran` with exit 0, the canary is unchanged, nothing new
+on the host, and no container is left. Any unexpected result stops the check; no second call without your OK.
 
 **Phase 5, optional: box the agent process too.** Only if you want defence against a `--restricted` regression. It means
 a second Pro login inside the box, sitting next to whatever the agent runs there, and an egress allow-list. One thing to
